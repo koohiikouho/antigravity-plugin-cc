@@ -1,14 +1,14 @@
-// Scan an `agy` --log-file to recover what print mode hides on stdout.
+// Scan an `agy` --log-file (and other error text) for what print mode hides.
 //
-// Grounded in real runtime behavior (agy 1.0.3): print mode exits 0 with EMPTY
-// stdout when the backend call fails (e.g. quota exhausted). The conversation ID
-// and the real error are only in the log. We parse both here.
+// agy 1.5.x reports most failures in the stream-json `result` event and on
+// stderr; the log file remains a useful secondary source (e.g. quota details,
+// older agy versions that exited 0 with empty stdout).
 
 /**
  * @param {string} logText raw contents of the agy log file (may be "")
  * @returns {{
  *   conversationId: string|null,
- *   error: { kind: "quota"|"auth"|"backend", message: string, resetsIn: string|null } | null,
+ *   error: { kind: "quota"|"auth"|"model"|"denied"|"backend", message: string, resetsIn: string|null } | null,
  *   errorLines: string[]
  * }}
  */
@@ -46,15 +46,44 @@ function extractErrorLines(text) {
       out.push(line);
     }
   }
-  // De-duplicate consecutive repeats (agy logs the same error twice).
+  // De-duplicate repeats (agy logs the same error twice).
   return dedupe(out);
 }
 
 function classifyError(errorLines) {
   if (errorLines.length === 0) return null;
-  const joined = errorLines.join("\n");
+  const specific = classifyErrorText(errorLines.join("\n"));
+  if (specific) return specific;
 
-  if (/RESOURCE_EXHAUSTED|Individual quota reached|quota/i.test(joined)) {
+  // Generic backend failure: surface the most informative, most recent line.
+  const informative =
+    [...errorLines].reverse().find((l) => /agent executor error|code \d{3}/i.test(l)) ||
+    errorLines[errorLines.length - 1];
+  return {
+    kind: "backend",
+    message: stripGlogPrefix(informative),
+    resetsIn: null,
+  };
+}
+
+const DENIED_RE = /auto-denied|cannot prompt for|user denied perm|PERMISSION_DENIED/i;
+
+function findLine(text, re) {
+  return text.split(/\r?\n/).find((l) => re.test(l)) || "";
+}
+
+/**
+ * Classify free-form error text (agy result.error, stderr, or log lines).
+ * Returns null when nothing recognizable is found.
+ *
+ * PERMISSION_DENIED is NOT treated as an auth failure: in headless runs it means
+ * a tool action was denied, not that the user is signed out.
+ */
+export function classifyErrorText(text) {
+  const joined = String(text || "");
+  if (!joined.trim()) return null;
+
+  if (/RESOURCE_EXHAUSTED|Individual quota reached|quota (?:exhausted|exceeded|reached)/i.test(joined)) {
     const reset = joined.match(/Resets in ([0-9hms]+)/i);
     return {
       kind: "quota",
@@ -63,7 +92,7 @@ function classifyError(errorLines) {
     };
   }
 
-  if (/UNAUTHENTICATED|not authenticated|login required|PERMISSION_DENIED/i.test(joined)) {
+  if (/UNAUTHENTICATED|not authenticated|authentication required|login required|not signed in/i.test(joined)) {
     return {
       kind: "auth",
       message: "Antigravity is not authenticated. Run `! agy` once to sign in.",
@@ -71,14 +100,16 @@ function classifyError(errorLines) {
     };
   }
 
-  // Generic backend failure: surface the most informative line.
-  const informative =
-    errorLines.find((l) => /agent executor error|code \d{3}/i.test(l)) || errorLines[errorLines.length - 1];
-  return {
-    kind: "backend",
-    message: stripGlogPrefix(informative),
-    resetsIn: null,
-  };
+  const modelRe = /invalid model selection|not recognized as a known model|--effort is not supported|conflicts with --effort/i;
+  if (modelRe.test(joined)) {
+    return { kind: "model", message: findLine(joined, modelRe).replace(/^error:\s*/i, "").trim(), resetsIn: null };
+  }
+
+  if (DENIED_RE.test(joined)) {
+    return { kind: "denied", message: stripGlogPrefix(findLine(joined, DENIED_RE)), resetsIn: null };
+  }
+
+  return null;
 }
 
 function stripGlogPrefix(line) {
@@ -89,18 +120,23 @@ function stripGlogPrefix(line) {
 }
 
 function dedupe(lines) {
-  // Strip glog prefixes, then drop any line whose message is a substring of a
-  // longer kept line. agy logs the same error twice — once wrapped in
-  // "agent executor error: <X>" and once as the bare "<X>" — so exact-key
-  // de-duplication is not enough; we collapse to the most informative line.
-  const keyed = lines.map((line) => ({ line, key: stripGlogPrefix(line) }));
-  keyed.sort((a, b) => b.key.length - a.key.length);
-  const kept = [];
-  for (const item of keyed) {
-    if (kept.some((k) => k.key === item.key || k.key.includes(item.key))) continue;
-    kept.push(item);
-  }
-  return kept.map((k) => k.line);
+  // agy logs the same error twice — once wrapped in "agent executor error: <X>"
+  // and once as the bare "<X>" — so drop any line whose message is contained in
+  // a longer one (or repeats an earlier identical one). Original log order is
+  // preserved so the last line is still the latest.
+  const keyed = lines.map((line, index) => ({ line, index, key: stripGlogPrefix(line) }));
+  return keyed
+    .filter(
+      (item) =>
+        !keyed.some(
+          (other) =>
+            other !== item &&
+            (other.key.length > item.key.length
+              ? other.key.includes(item.key)
+              : other.key === item.key && other.index < item.index),
+        ),
+    )
+    .map((k) => k.line);
 }
 
 export { stripGlogPrefix };

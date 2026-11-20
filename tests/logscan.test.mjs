@@ -49,3 +49,18 @@ test("returns null error on clean log", () => {
 test("stripGlogPrefix is a no-op on plain text", () => {
   assert.equal(stripGlogPrefix("just a message"), "just a message");
 });
+
+test("PERMISSION_DENIED is a tool denial, not an auth failure", () => {
+  const r = scanAgyLog("E0101 00:00:00 1 log.go:1] PERMISSION_DENIED (code 403): tool action denied");
+  assert.notEqual(r.error.kind, "auth");
+  assert.equal(r.error.kind, "denied");
+});
+
+test("deduped error lines keep log order", () => {
+  const r = scanAgyLog(
+    "E0101 00:00:00 1 a.go:1] INTERNAL (code 500): first failure\nE0101 00:00:01 1 b.go:2] INTERNAL (code 500): second failure",
+  );
+  assert.equal(r.errorLines.length, 2);
+  assert.match(r.errorLines[0], /first failure/);
+  assert.match(r.errorLines[1], /second failure/);
+});

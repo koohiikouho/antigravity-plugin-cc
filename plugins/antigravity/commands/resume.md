@@ -1,10 +1,10 @@
 ---
-description: Continue the most recent Antigravity (Gemini 3.5) conversation with a follow-up.
+description: Continue this repo's most recent Antigravity conversation with a follow-up.
 argument-hint: "[--conversation <id>] [--background] [follow-up instruction]"
 allowed-tools: Bash(node:*)
 ---
 
-Push a follow-up to the most recent Antigravity conversation (or a specific one with `--conversation <id>`). Handy right after a `/antigravity:delegate` or `/antigravity:review` when you want to keep the same Gemini 3.5 thread instead of starting fresh.
+Push a follow-up to the most recent Antigravity conversation started from this repository (or a specific one with `--conversation <id>`). Handy right after a `/antigravity:delegate` or `/antigravity:review` when you want to keep the same thread instead of starting fresh. Conversations from other repos are never picked up; if this repo has none yet, the companion says so.
 
 Run exactly this and show the output verbatim:
 

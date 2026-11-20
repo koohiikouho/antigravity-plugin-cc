@@ -1,0 +1,16 @@
+{
+  "description": "Optional stop-time review gate. Off by default; enable per repository with /antigravity:setup --enable-review-gate.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/antigravity.mjs\" review-gate-hook",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
+}

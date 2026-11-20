@@ -1,5 +1,7 @@
 // Background job state for the Antigravity companion.
-// One directory per job under jobsRoot(): meta.json + output.txt + err.txt + agy.log
+// One directory per job under jobsRoot():
+//   meta.json + input.ndjson (prompt, fed on stdin) + output.txt (stream-json
+//   NDJSON) + err.txt (stderr) + agy.log
 
 import {
   mkdirSync,
@@ -11,8 +13,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { jobsRoot, jobDir } from "./paths.mjs";
-import { readLogSafe } from "./agy.mjs";
-import { scanAgyLog } from "./logscan.mjs";
+import { readLogSafe, interpretRun, killTree } from "./agy.mjs";
 
 function nowIso() {
   return new Date().toISOString();
@@ -29,6 +30,7 @@ export function jobPaths(id, env = process.env) {
   return {
     dir,
     meta: join(dir, "meta.json"),
+    input: join(dir, "input.ndjson"),
     output: join(dir, "output.txt"),
     err: join(dir, "err.txt"),
     log: join(dir, "agy.log"),
@@ -51,6 +53,9 @@ export function createJob(meta, env = process.env) {
     startedAt: meta.startedAt || nowIso(),
     finishedAt: meta.finishedAt ?? null,
     error: meta.error ?? null,
+    errorKind: meta.errorKind ?? null,
+    denial: meta.denial ?? null,
+    deadline: meta.deadline ?? null,
     paths,
   };
   writeFileSync(paths.meta, JSON.stringify(record, null, 2));
@@ -85,30 +90,46 @@ export function isAlive(pid) {
 }
 
 /**
- * Reconcile a job's recorded status with reality: if it was "running" but the pid
- * is gone, read output + log, classify, and persist a terminal status.
+ * Interpret a finished job's files (stream-json stdout, stderr, agy log) and
+ * persist a terminal status on the job record.
+ */
+export function finalizeJob(job, { timedOut = false } = {}) {
+  const outcome = interpretRun({
+    stdout: readLogSafe(job.paths.output),
+    stderr: readLogSafe(job.paths.err),
+    logText: readLogSafe(job.paths.log),
+    code: null,
+    timedOut,
+  });
+  job.finishedAt = job.finishedAt || nowIso();
+  job.conversationId = outcome.conversationId || job.conversationId;
+  job.status = outcome.ok ? "done" : "failed";
+  job.error = outcome.error
+    ? outcome.error.message + (outcome.error.resetsIn ? ` (resets in ${outcome.error.resetsIn})` : "")
+    : null;
+  job.errorKind = outcome.error?.kind || null;
+  job.denial = outcome.denial || null;
+  writeJob(job);
+  return outcome;
+}
+
+/**
+ * Reconcile a job's recorded status with reality. A running job past its
+ * deadline (print timeout + grace) is killed and marked failed; a running job
+ * whose process is gone is finalized from its output.
  */
 export function reconcile(job) {
   if (!job) return job;
   if (job.status !== "running") return job;
-  if (isAlive(job.pid)) return job;
-
-  const output = readLogSafe(job.paths.output).trim();
-  const logText = readLogSafe(job.paths.log);
-  const scan = scanAgyLog(logText);
-
-  job.finishedAt = nowIso();
-  job.conversationId = job.conversationId || scan.conversationId;
-  if (output) {
-    job.status = "done";
-  } else if (scan.error) {
-    job.status = "failed";
-    job.error = scan.error.message + (scan.error.resetsIn ? ` (resets in ${scan.error.resetsIn})` : "");
-  } else {
-    // No output, no detected error: treat as done-but-empty.
-    job.status = "done";
+  if (isAlive(job.pid)) {
+    if (job.deadline && Date.now() > Date.parse(job.deadline)) {
+      killTree(job.pid);
+      finalizeJob(job, { timedOut: true });
+    }
+    return job;
   }
-  return writeJob(job);
+  finalizeJob(job);
+  return job;
 }
 
 export function listJobs(cwd, env = process.env) {
@@ -140,11 +161,7 @@ export function cancelJob(job) {
     writeJob(job);
     return { cancelled: false, reason: "process already exited" };
   }
-  try {
-    process.kill(job.pid, "SIGTERM");
-  } catch {
-    /* ignore */
-  }
+  killTree(job.pid);
   job.status = "cancelled";
   job.finishedAt = nowIso();
   writeJob(job);

@@ -1,43 +1,50 @@
 #!/usr/bin/env node
 // Antigravity companion for Claude Code.
 //
-// Thin, dependency-free runtime that drives the `agy` CLI (Google Antigravity,
-// Gemini 3) in print mode and manages background jobs. Each subcommand prints
+// Thin, dependency-free runtime that drives the `agy` CLI (Google Antigravity)
+// in headless print mode and manages background jobs. Each subcommand prints
 // Markdown that the calling slash command / subagent relays to the user verbatim.
 //
 // Subcommands: setup | delegate | review | resume | status | result | cancel
-//   (aliases: run -> delegate)
+//   (aliases: run, task -> delegate)
 
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { parseArgs, hasFlag } from "./lib/args.mjs";
 import { resolveAgyBinary, agyConfigDir } from "./lib/paths.mjs";
 import {
   buildPrintArgs,
+  readOnlySettings,
+  encodePrompt,
+  interpretRun,
   runForeground,
   spawnBackground,
   goDurationToMs,
   agyVersion,
+  agyModels,
+  agyFeatures,
+  latestToolStep,
   readLogSafe,
 } from "./lib/agy.mjs";
-import { scanAgyLog } from "./lib/logscan.mjs";
 import { resolveReviewTarget } from "./lib/git.mjs";
-import {
-  createJob,
-  writeJob,
-  readJob,
-  reconcile,
-  listJobs,
-  latestJob,
-  cancelJob,
-} from "./lib/jobs.mjs";
+import { REVIEW_SCHEMA, normalizeReview } from "./lib/review.mjs";
+import { createJob, writeJob, readJob, reconcile, listJobs, latestJob, cancelJob, nowIso } from "./lib/jobs.mjs";
+import { readGate, writeGate, anyGateEnabled, repoKey, hashDiff, blockReason } from "./lib/gate.mjs";
 import * as render from "./lib/render.mjs";
 
-const MAX_PROMPT_BYTES = 100 * 1024;
+// The prompt travels on stdin, so there is no OS command-line limit; this cap
+// only keeps a runaway diff from blowing the model's context.
+const MAX_PROMPT_BYTES = 512 * 1024;
+const DEFAULT_PRINT_TIMEOUT = "10m";
+const WATCHDOG_GRACE_MS = 60_000;
 
 function out(text) {
   process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+}
+
+function warn(text) {
+  process.stderr.write(`[antigravity-plugin-cc] ${text}\n`);
 }
 
 function requireBinaryOrExit() {
@@ -59,6 +66,7 @@ function clampPrompt(prompt) {
 // setup
 // ---------------------------------------------------------------------------
 function cmdSetup(parsed) {
+  const gateNote = applyGateToggle(parsed);
   const bin = resolveAgyBinary();
   const configDir = agyConfigDir();
   const configExists = existsSync(configDir);
@@ -68,9 +76,10 @@ function cmdSetup(parsed) {
     safeReaddir(join(configDir, "conversations")).some((f) => f.endsWith(".pb"));
 
   const version = bin ? agyVersion(bin.path) : null;
-  // Best-effort auth signal: we never log you in. Presence of prior threads or an
-  // installation id strongly suggests a completed sign-in.
-  const authedGuess = configExists && (installationId || hasConversations);
+  // `agy models` needs a signed-in CLI but spends no quota; an empty list is a
+  // strong hint that sign-in is missing.
+  const models = bin ? agyModels(bin.path) : [];
+  const authedGuess = models.length > 0 || (configExists && (installationId || hasConversations));
 
   const report = {
     ready: Boolean(bin),
@@ -81,9 +90,12 @@ function cmdSetup(parsed) {
       detail: !bin
         ? "n/a (install agy first)"
         : authedGuess
-          ? "looks configured (a prior signed-in session was found)"
-          : "no prior session detected — run `! agy` once to sign in",
+          ? "looks configured"
+          : "no signed-in session detected — run `! agy` once to sign in",
     },
+    models,
+    reviewGate: gateStatus(bin),
+    gateNote,
     nextSteps: [],
   };
 
@@ -105,6 +117,8 @@ function cmdSetup(parsed) {
           version,
           authedGuess,
           configDir,
+          models: models.map((m) => m.slug),
+          reviewGate: report.reviewGate.enabled,
         },
         null,
         2,
@@ -114,10 +128,39 @@ function cmdSetup(parsed) {
   }
 
   if (!bin) {
-    out(render.renderNotInstalled());
+    out(`${render.renderNotInstalled()}${gateNote ? `\n${gateNote}\n` : ""}`);
     return;
   }
   out(render.renderSetup(report));
+}
+
+/** `setup --enable-review-gate` / `--disable-review-gate`, for the current repository. */
+function applyGateToggle(parsed) {
+  const enable = hasFlag(parsed, "enable-review-gate");
+  const disable = hasFlag(parsed, "disable-review-gate");
+  if (!enable && !disable) return null;
+  if (enable && disable) return "Pass only one of `--enable-review-gate` / `--disable-review-gate`. Nothing changed.";
+  const key = repoKey(process.cwd());
+  if (!key) return "The review gate is per repository, and this directory is not inside a git repository. Nothing changed.";
+  const state = readGate();
+  state.repos[key] = { ...(state.repos[key] || {}), enabled: enable };
+  writeGate(state);
+  return enable
+    ? `Review gate enabled for \`${key}\`. When Claude finishes a turn with uncommitted changes here, Antigravity reviews them (read-only) and sends Claude back to work on a "needs work" verdict. Each turn's review can take a few minutes and uses agy quota.`
+    : `Review gate disabled for \`${key}\`.`;
+}
+
+function gateStatus(bin) {
+  const key = repoKey(process.cwd());
+  const entry = key ? readGate().repos[key] : null;
+  const features = bin ? agyFeatures(bin.path) : { settings: false, jsonSchema: false };
+  return {
+    repo: key,
+    enabled: Boolean(entry?.enabled),
+    supported: Boolean(features.settings && features.jsonSchema),
+    lastVerdict: entry?.lastVerdict || null,
+    lastAt: entry?.lastAt || null,
+  };
 }
 
 function safeReaddir(dir) {
@@ -129,46 +172,90 @@ function safeReaddir(dir) {
 }
 
 // ---------------------------------------------------------------------------
-// delegate / resume (shared core)
+// delegate / resume / review (shared core)
 // ---------------------------------------------------------------------------
+
+/** Most recent conversation id recorded by a job started from `cwd`. */
+function latestConversationId(cwd) {
+  const job = listJobs(cwd).find((j) => j.conversationId);
+  return job ? job.conversationId : null;
+}
+
 function runAgyTask(parsed, { kind, title, prompt, readOnly, resume }) {
   const bin = requireBinaryOrExit();
   const cwd = process.cwd();
 
-  const sandbox = hasFlag(parsed, "sandbox") || Boolean(readOnly);
-  const yolo = !hasFlag(parsed, "no-yolo"); // write-capable by default; contained if sandbox
-  const continueLast = resume && !parsed.valued.conversation ? true : hasFlag(parsed, "continue");
-  const conversationId = parsed.valued.conversation || null;
-  const printTimeout = parsed.valued["print-timeout"] || "10m";
-  const addDirs = [cwd, ...(parsed.repeated["add-dir"] || [])];
-
-  if (parsed.valued.model) {
-    // agy has no model flag; warn but continue. (See docs/antigravity-cli-reference.md)
-    process.stderr.write(
-      "[antigravity-plugin-cc] note: agy has no --model flag; set the default model with /model inside agy. Ignoring --model.\n",
-    );
+  // Read-only depends on session deny rules (--settings). Refuse rather than
+  // run a "read-only" job that can still write files. Checked before createJob
+  // so a refusal leaves no orphaned job, foreground or background.
+  const features = agyFeatures(bin.path);
+  if (readOnly && !features.settings) {
+    out(render.renderNeedsUpdate(kind === "review" ? "review" : "--read-only"));
+    return;
   }
+
+  const sandbox = hasFlag(parsed, "sandbox") || Boolean(readOnly);
+  // Auto-approving every tool is opt-in, and never allowed for read-only runs.
+  let yolo = hasFlag(parsed, "yolo");
+  if (yolo && readOnly) {
+    warn("--yolo is ignored for read-only runs (review / --read-only).");
+    yolo = false;
+  }
+
+  // `agy --continue` resumes the most recent conversation *globally*, which may
+  // belong to another repo. Resolve the thread from this repo's own jobs instead.
+  let conversationId = parsed.valued.conversation || null;
+  if (!conversationId && (resume || hasFlag(parsed, "continue"))) {
+    conversationId = latestConversationId(cwd);
+    if (!conversationId) {
+      out(
+        "# 🛰️ Antigravity — resume\n\nNo earlier Antigravity conversation was recorded for this repository. " +
+          "Start one with `/antigravity:delegate <task>`, or pass `--conversation <id>`.",
+      );
+      return;
+    }
+  }
+
+  const printTimeout = parsed.valued["print-timeout"] || DEFAULT_PRINT_TIMEOUT;
+  const timeoutMs = goDurationToMs(printTimeout, goDurationToMs(DEFAULT_PRINT_TIMEOUT));
+  const watchdogMs = timeoutMs > 0 ? timeoutMs + WATCHDOG_GRACE_MS : undefined;
+  const addDirs = [cwd, ...(parsed.repeated["add-dir"] || [])];
+  const model = parsed.valued.model || process.env.ANTIGRAVITY_CC_MODEL || null;
+  const effort = parsed.valued.effort || null;
+  const mode = parsed.valued.mode || null;
 
   const finalPrompt = clampPrompt(prompt);
   const background = hasFlag(parsed, "background");
 
   const job = createJob({ kind, title, prompt: finalPrompt, cwd, conversationId });
+  job.model = model;
+  job.yolo = yolo;
+  job.readOnly = Boolean(readOnly);
+  if (watchdogMs) job.deadline = new Date(Date.parse(job.startedAt) + watchdogMs).toISOString();
+
   const args = buildPrintArgs({
-    prompt: finalPrompt,
-    addDirs,
-    yolo,
+    model,
+    effort,
+    mode,
     sandbox,
-    continueLast,
+    yolo,
+    settings: readOnly ? readOnlySettings(agyConfigDir()) : undefined,
+    // Older agy without --json-schema still gets a prose review.
+    jsonSchema: kind === "review" && features.jsonSchema ? REVIEW_SCHEMA : undefined,
+    addDirs,
     conversationId,
     logFile: job.paths.log,
     printTimeout,
   });
+  const input = encodePrompt(finalPrompt);
 
   if (background) {
     const { pid } = spawnBackground({
       bin: bin.path,
       args,
       cwd,
+      input,
+      inputFile: job.paths.input,
       outputFile: job.paths.output,
       errFile: job.paths.err,
     });
@@ -178,42 +265,46 @@ function runAgyTask(parsed, { kind, title, prompt, readOnly, resume }) {
     return;
   }
 
-  const watchdogMs = goDurationToMs(printTimeout) + 60_000;
-  const result = runForeground({ bin: bin.path, args, cwd, logFile: job.paths.log, watchdogMs });
-  const scan = scanAgyLog(result.logText);
-  job.conversationId = scan.conversationId || job.conversationId;
+  const result = runForeground({ bin: bin.path, args, cwd, input, logFile: job.paths.log, watchdogMs });
+  const outcome = interpretRun({ ...result, printTimeout });
 
-  const responseText = result.stdout.trim();
-  if (responseText) {
-    job.status = "done";
-    writeJob(job);
-    out(render.renderResponse(responseText, { title, conversationId: job.conversationId }));
-    return;
-  }
-
-  if (result.timedOut) {
-    job.status = "failed";
-    job.error = `timed out after ${printTimeout}`;
-    writeJob(job);
-    out(
-      render.renderError(
-        { kind: "backend", message: `Antigravity timed out after ${printTimeout}. Try --print-timeout 20m or run with --background.` },
-        { title, conversationId: job.conversationId, logFile: job.paths.log },
-      ),
-    );
-    return;
-  }
-
-  job.status = scan.error ? "failed" : "done";
-  job.error = scan.error ? scan.error.message : null;
+  job.conversationId = outcome.conversationId || job.conversationId;
+  job.finishedAt = nowIso();
+  job.status = outcome.ok ? "done" : "failed";
+  job.error = outcome.error ? outcome.error.message : null;
+  job.errorKind = outcome.error?.kind || null;
+  job.denial = outcome.denial;
   writeJob(job);
-  out(render.renderError(scan.error, { title, conversationId: job.conversationId, logFile: job.paths.log }));
+
+  out(renderOutcome(outcome, job, { yolo, readOnly }));
+}
+
+function renderOutcome(outcome, job, { yolo, readOnly } = {}) {
+  const meta = {
+    title: job.title,
+    conversationId: job.conversationId,
+    logFile: job.paths.log,
+    denial: outcome.denial,
+    cwd: job.cwd,
+    yolo,
+    readOnly,
+  };
+  if (outcome.ok) {
+    // A structured review renders on its own; agy's `response` repeats it as a
+    // trailing JSON line, so it is not printed too. Bad shapes fall back to prose.
+    const review = job.kind === "review" ? normalizeReview(outcome.structured) : null;
+    if (review) return render.renderReview(review, meta);
+    return render.renderResponse(outcome.response, meta);
+  }
+  return render.renderError(outcome.error, { ...meta, partialResponse: outcome.response });
 }
 
 function cmdDelegate(parsed) {
   const task = parsed.text;
   if (!task) {
-    out("# 🛰️ Antigravity — delegate\n\nWhat should Antigravity (Gemini 3) work on? Pass the task, e.g.\n`/antigravity:delegate investigate why the auth tests fail and propose a fix`.");
+    out(
+      "# 🛰️ Antigravity — delegate\n\nWhat should Antigravity work on? Pass the task, e.g.\n`/antigravity:delegate investigate why the auth tests fail and propose a fix`.",
+    );
     return;
   }
   runAgyTask(parsed, { kind: "delegate", title: truncate(task, 80), prompt: task, readOnly: hasFlag(parsed, "read-only") });
@@ -226,6 +317,7 @@ function cmdResume(parsed) {
     title: truncate(followUp, 80),
     prompt: followUp,
     resume: true,
+    readOnly: hasFlag(parsed, "read-only"),
   });
 }
 
@@ -245,9 +337,9 @@ function cmdReview(parsed) {
   }
 
   const prompt = buildReviewPrompt(target, focus);
-  // Reviews are contained + read-capable but should not modify the tree.
-  const reviewParsed = { ...parsed, flags: { ...parsed.flags, sandbox: true } };
-  runAgyTask(reviewParsed, {
+  // Reviews are read-only: sandboxed, never auto-approved, and with session deny
+  // rules for file writes and commands (readOnlySettings).
+  runAgyTask(parsed, {
     kind: "review",
     title: `review ${target.label}`,
     prompt,
@@ -276,6 +368,72 @@ function buildReviewPrompt(target, focus) {
 }
 
 // ---------------------------------------------------------------------------
+// review gate (Stop hook)
+// ---------------------------------------------------------------------------
+const GATE_PRINT_TIMEOUT = "8m"; // + WATCHDOG_GRACE_MS stays under the hook's 600s timeout
+
+/**
+ * Called by hooks/hooks.json on Stop. Prints nothing (allow) or one JSON object
+ * `{"decision":"block","reason":...}` on stdout. Fails open: any missing piece
+ * (no agy, too old, quota, auth, timeout, bad output) lets Claude stop.
+ */
+function cmdReviewGateHook() {
+  let input = {};
+  try {
+    input = JSON.parse(readFileSync(0, "utf8") || "{}");
+  } catch {
+    /* no or bad stdin: treat as empty */
+  }
+  // Claude is already continuing because of a Stop hook: never loop.
+  if (input.stop_hook_active) return;
+
+  const state = readGate();
+  if (!anyGateEnabled(state)) return; // fast path: one file read, no git, no agy
+
+  const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
+  const key = repoKey(cwd);
+  const entry = key ? state.repos[key] : null;
+  if (!entry?.enabled) return;
+
+  const bin = resolveAgyBinary();
+  if (!bin) return;
+  const features = agyFeatures(bin.path);
+  if (!features.settings || !features.jsonSchema) return;
+
+  const target = resolveReviewTarget(cwd, null);
+  if (!target.ok) return;
+  const hash = hashDiff(target.diff);
+  if (entry.lastHash === hash) return; // this exact diff was already gated
+
+  const args = buildPrintArgs({
+    model: process.env.ANTIGRAVITY_CC_MODEL || null,
+    sandbox: true,
+    settings: readOnlySettings(agyConfigDir()),
+    jsonSchema: REVIEW_SCHEMA,
+    addDirs: [cwd],
+    printTimeout: GATE_PRINT_TIMEOUT,
+  });
+  const run = runForeground({
+    bin: bin.path,
+    args,
+    cwd,
+    input: encodePrompt(clampPrompt(buildReviewPrompt(target, null))),
+    watchdogMs: goDurationToMs(GATE_PRINT_TIMEOUT) + WATCHDOG_GRACE_MS,
+  });
+  const outcome = interpretRun({ ...run, printTimeout: GATE_PRINT_TIMEOUT });
+  const review = outcome.ok ? normalizeReview(outcome.structured) : null;
+  if (!review) return; // no usable verdict: don't record, don't block
+
+  const fresh = readGate(); // re-read: setup may have run meanwhile
+  fresh.repos[key] = { ...(fresh.repos[key] || entry), lastHash: hash, lastVerdict: review.verdict, lastAt: nowIso() };
+  writeGate(fresh);
+
+  if (review.verdict === "needs-work") {
+    out(JSON.stringify({ decision: "block", reason: blockReason(review, (f) => render.displayPath(f, cwd)) }));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // status / result / cancel
 // ---------------------------------------------------------------------------
 function cmdStatus(parsed) {
@@ -287,33 +445,57 @@ function cmdStatus(parsed) {
       return;
     }
     reconcile(job);
-    out(render.renderJobStatus(job));
+    out(render.renderJobStatus(withProgress(job)));
     return;
   }
-  out(render.renderStatus(listJobs(process.cwd())));
+  out(render.renderStatus(listJobs(process.cwd()).map(withProgress)));
+}
+
+/** Attach the latest tool step to a running background job (read from its output file). */
+function withProgress(job) {
+  if (job.status !== "running") return job;
+  return { ...job, progress: latestToolStep(readLogSafe(job.paths.output)) };
 }
 
 function cmdResult(parsed) {
   const id = parsed.positionals.find((p) => p.startsWith("agy-"));
-  let job = id ? readJob(id) : latestJob(process.cwd());
+  const job = id ? readJob(id) : latestJob(process.cwd());
   if (!job) {
     out(`# 🛰️ Antigravity — result\n\nNo ${id ? `job \`${id}\`` : "recent jobs"} found for this repository.`);
     return;
   }
   reconcile(job);
   if (job.status === "running") {
-    out(render.renderJobStatus(job));
+    out(render.renderJobStatus(withProgress(job)));
     return;
   }
 
-  const output = readLogSafe(job.paths.output).trim();
-  const scan = scanAgyLog(readLogSafe(job.paths.log));
-  const conversationId = job.conversationId || scan.conversationId;
-  if (output) {
-    out(render.renderResponse(output, { title: job.title, conversationId }));
-  } else {
-    out(render.renderError(scan.error, { title: job.title, conversationId, logFile: job.paths.log }));
+  const outcome = interpretRun({
+    stdout: readLogSafe(job.paths.output),
+    stderr: readLogSafe(job.paths.err),
+    logText: readLogSafe(job.paths.log),
+    code: null,
+    timedOut: job.errorKind === "timeout",
+  });
+  if (job.status === "cancelled") {
+    out(render.renderError({ kind: "cancelled", message: "The job was cancelled.", resetsIn: null }, {
+      title: job.title,
+      conversationId: job.conversationId,
+      partialResponse: outcome.response,
+    }));
+    return;
   }
+  // Foreground jobs keep no output file; fall back to the recorded status.
+  if (!readLogSafe(job.paths.output) && job.status === "failed") {
+    out(render.renderError({ kind: job.errorKind || "backend", message: job.error || "failed", resetsIn: null }, {
+      title: job.title,
+      conversationId: job.conversationId,
+      logFile: job.paths.log,
+    }));
+    return;
+  }
+  job.conversationId = job.conversationId || outcome.conversationId;
+  out(renderOutcome(outcome, job, { yolo: job.yolo, readOnly: job.readOnly ?? job.kind === "review" }));
 }
 
 function cmdCancel(parsed) {
@@ -336,16 +518,20 @@ function truncate(s, n) {
 function usage() {
   out(
     [
-      "antigravity companion — drive the Antigravity CLI (agy / Gemini 3) from Claude Code",
+      "antigravity companion — drive the Antigravity CLI (agy) from Claude Code",
       "",
       "Usage: node antigravity.mjs <subcommand> [args]",
-      "  setup [--json]",
-      "  delegate <task> [--background] [--sandbox] [--read-only] [--continue] [--conversation <id>] [--add-dir <p>] [--print-timeout <dur>]",
-      "  review [--base <ref>] [--background] [focus text...]",
-      "  resume <follow-up> [--conversation <id>] [--background]",
+      "  setup [--json] [--enable-review-gate | --disable-review-gate]",
+      "  delegate <task> [--background] [--model <slug>] [--effort <lvl>] [--mode <m>] [--yolo] [--sandbox] [--read-only]",
+      "                  [--continue] [--conversation <id>] [--add-dir <p>] [--print-timeout <dur>]",
+      "  review [--base <ref>] [--background] [--model <slug>] [focus text...]",
+      "  resume <follow-up> [--conversation <id>] [--background] [--model <slug>]",
       "  status [job-id]",
       "  result [job-id]",
       "  cancel [job-id]",
+      "",
+      "Models: run `agy models` for the slugs (e.g. gemini-4-hydrogen-low, gemini-4-neon-high).",
+      "Set a default with ANTIGRAVITY_CC_MODEL.",
     ].join("\n"),
   );
 }
@@ -370,6 +556,13 @@ function main() {
       return cmdResult(parsed);
     case "cancel":
       return cmdCancel(parsed);
+    case "review-gate-hook":
+      try {
+        return cmdReviewGateHook();
+      } catch (e) {
+        warn(`review gate skipped: ${e?.message || e}`); // fail open
+        return;
+      }
     default:
       return usage();
   }
