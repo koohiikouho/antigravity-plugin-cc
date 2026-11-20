@@ -15,6 +15,7 @@ Updated for agy 1.5.x and Windows.
 - `review` and `--read-only` refuse to run, with an `agy update` hint, when `agy --help` doesn't list `--settings`. Before, they could run without the deny rules.
 - Read-only runs keep your own agy permission rules. `--settings` replaces the `permissions` in agy's `settings.json`, so the plugin now copies them in and adds its deny rules on top.
 - The `gemini-3-prompting` skill is now `gemini-prompting`.
+- The `antigravity-result-handling` skill is a short table now (8.5 KB → 2.5 KB), so `delegate`, `review`, `resume` and `result` load about 1,500 fewer tokens. Same rules.
 - The README banner image was removed.
 
 ### Fixed
