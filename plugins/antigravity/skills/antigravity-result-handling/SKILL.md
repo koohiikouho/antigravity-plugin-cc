@@ -26,6 +26,18 @@ The common case: Antigravity answered.
 
 If `delegate` ran with `--read-only` or `--sandbox`, there are no on-disk changes to verify — the response is advisory only. Say that, so the developer knows nothing was applied.
 
+### Structured reviews
+
+`/antigravity:review` usually prints `**Verdict: …**` (ship / ship with nits / needs work), a summary, then `## Findings` most severe first as `**[severity]** \`file:line\` — title`, each with detail and often `Fix:`. Relay it as is, then name the most important finding. The verdict is Antigravity's opinion: check a `critical`/`high` finding against the code before you act on it. A prose review instead of this shape means agy lacks `--json-schema` or returned a bad shape; treat it like any other answer.
+
+### "Your agy is too old"
+
+`review` and `--read-only` need agy's `--settings` flag to stay read-only. Without it the companion refuses and prints an `agy update` step. Nothing ran. Tell the user to run `agy update`, then retry. Don't re-run without `--read-only` to get around it unless the user agrees that the run may write files.
+
+### Review gate blocks
+
+When the stop-time review gate is on (`/antigravity:setup --enable-review-gate`), a Stop hook can send you back with `Antigravity review gate: verdict "needs work"` and a findings list. Treat it like a review the user asked for: check each finding against the code, fix the real ones, and tell the user which you skipped and why. The hook does not run again while you are continuing from it, and the same diff is not reviewed twice.
+
 ---
 
 ## Case 1b — Headless auto-denial
@@ -98,6 +110,8 @@ Pass the id along whenever the work isn't obviously finished — it's the cheape
 | Signal in output | What it means | What you do |
 |---|---|---|
 | Answer text + (maybe) diff | Normal response | Lead with the answer; `git diff` to verify any file edits; surface conversation id |
+| `**Verdict: …**` + `## Findings` | Structured review | Relay; verify high-severity findings against the code |
+| `Your agy is too old for …` | No `--settings`, nothing ran | Tell them to `agy update` |
 | `Headless mode auto-denied: ...` | A tool needed approval | Say what was denied; suggest `permissions.allow` or `--yolo` (delegate only) |
 | `RESOURCE_EXHAUSTED (429) ... Resets in <dur>` | Quota gone | Report reset window; suggest wait, another model or account; note Claude can continue |
 | `agy rejected the model selection` | Bad `--model` / `--effort` | Point at `agy models`; don't guess |

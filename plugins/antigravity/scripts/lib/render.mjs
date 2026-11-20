@@ -202,6 +202,20 @@ export function renderSetup(report) {
     for (const m of report.models) lines.push(`- \`${m.slug}\` — ${m.name}`);
     lines.push("");
   }
+  const gate = report.reviewGate;
+  if (gate) {
+    let state = gate.enabled ? "on" : "off";
+    if (!gate.repo) state = "n/a (not a git repository)";
+    else if (gate.enabled && !gate.supported) state = "on, but inactive: this agy lacks `--settings` / `--json-schema` (run `agy update`)";
+    lines.push(`Review gate (this repo): ${state}${gate.lastVerdict ? ` · last verdict: ${gate.lastVerdict}` : ""}`);
+    lines.push(
+      gate.enabled
+        ? "- Turn it off with `/antigravity:setup --disable-review-gate`."
+        : "- `/antigravity:setup --enable-review-gate` reviews uncommitted changes whenever Claude stops, and sends Claude back on \"needs work\".",
+    );
+    lines.push("");
+  }
+  if (report.gateNote) lines.push(report.gateNote, "");
   if (report.nextSteps.length) {
     lines.push("Next steps:");
     for (const step of report.nextSteps) lines.push(`- ${step}`);

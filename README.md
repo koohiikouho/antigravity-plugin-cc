@@ -15,11 +15,11 @@ A Claude Code plugin that hands work to `agy` — Google's Antigravity CLI — a
 
 Seven slash commands, all under the `/antigravity:` namespace. Each one shells out to a small Node companion that wraps `agy` in headless print mode and manages background jobs.
 
-- **`/antigravity:setup`** — check that `agy` is installed, find its binary and version, list the models your account can use, and check whether you're signed in. Never logs you in.
+- **`/antigravity:setup`** — check that `agy` is installed, find its binary and version, list the models your account can use, and check whether you're signed in. Never logs you in. Also turns the optional stop-time review gate on or off.
 - **`/antigravity:delegate`** — hand a task to Antigravity. Write-capable by default; can be sandboxed or made read-only, can pick a model, and can run in the background.
-- **`/antigravity:review`** — read-only cross-model review of your current diff (or `base...HEAD`). Sandboxed.
+- **`/antigravity:review`** — read-only cross-model review of your current diff (or `base...HEAD`). Sandboxed. Returns a verdict and findings ordered by severity.
 - **`/antigravity:resume`** — continue this repo's most recent Antigravity conversation (or a specific one) with a follow-up.
-- **`/antigravity:status`** — list background jobs for this repo, or inspect one.
+- **`/antigravity:status`** — list background jobs for this repo, or inspect one. Running jobs show their latest tool step.
 - **`/antigravity:result`** — print the final output of a finished job, plus the conversation id and a resume hint.
 - **`/antigravity:cancel`** — stop a running background job.
 
@@ -90,7 +90,20 @@ Cross-model review of your working tree. Read-only and sandboxed — `agy` reads
 /antigravity:review --base main the auth refactor in this branch
 ```
 
-Returns Antigravity's review of the embedded diff. Add `--model <slug>` to pick the reviewer model. Pair it with your own review for two models on one change.
+Returns a verdict (ship / ship with nits / needs work), then findings most severe first, each with `file:line` and a suggested fix. The plugin asks agy for this shape with `--json-schema`; an agy build without that flag gets a prose review instead. Add `--model <slug>` to pick the reviewer model. Pair it with your own review for two models on one change.
+
+Read-only runs need an agy that supports `--settings` (1.5.13 does). On an older build, `review` and `--read-only` refuse to run and tell you to `agy update`, rather than run a "read-only" job that could still write files.
+
+### Stop-time review gate (optional)
+
+```text
+/antigravity:setup --enable-review-gate
+/antigravity:setup --disable-review-gate
+```
+
+Off by default, and per repository. When it's on and Claude finishes a turn with uncommitted changes, a `Stop` hook has Antigravity review them (same read-only review as above). On a "needs work" verdict, Claude is sent back with the findings instead of stopping. Every other outcome lets Claude stop: ship verdicts, no changes, quota or auth errors, an agy too old for `--settings` / `--json-schema`, or a review that times out (8 minutes). The same diff is never reviewed twice, and the hook never re-runs while Claude is already continuing from it.
+
+Each gated turn can add a few minutes and uses agy quota. Keep it for work where a second model is worth the wait.
 
 ### `/antigravity:delegate` ⭐
 
@@ -112,7 +125,7 @@ Background flow — kick it off, keep working, collect later:
    → returns a job id, e.g. agy-l3k9zf-a8x2qd
 
 /antigravity:status
-   → agy-l3k9zf-a8x2qd   running   "port the utils module…"
+   → agy-l3k9zf-a8x2qd   running   "port the utils module…"   now: read_file `src/utils.js` (4 tool steps)
 
 /antigravity:status agy-l3k9zf-a8x2qd
    → agy-l3k9zf-a8x2qd   done

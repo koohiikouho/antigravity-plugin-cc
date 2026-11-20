@@ -12,7 +12,7 @@ Run the companion and present its output:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity.mjs" review $ARGUMENTS
 ```
 
-Then show the review verbatim, then add a one-line summary of the most important finding (if any). Use the `antigravity-result-handling` skill to interpret the companion output first — distinguish a real review from a quota/auth/backend error so you never present an empty result as a clean review.
+Then show the review verbatim, then add a one-line summary of the most important finding (if any). The review starts with a **Verdict** line and lists findings most severe first with `file:line`; on an older agy without `--json-schema` it is prose instead. If the output says agy is too old for a read-only review, relay that and the `agy update` step; nothing was run. Use the `antigravity-result-handling` skill to interpret the companion output first — distinguish a real review from a quota/auth/backend error so you never present an empty result as a clean review.
 
 ## What the arguments do
 

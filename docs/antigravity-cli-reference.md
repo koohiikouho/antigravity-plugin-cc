@@ -53,6 +53,7 @@ unknown ones.
 
 ```text
 agy [--model M] [--effort E] [--mode MODE] [--sandbox] [--dangerously-skip-permissions]
+    [--settings JSON] [--json-schema JSON]
     [--add-dir DIR]... [--conversation ID] --log-file PATH --print-timeout DUR
     --input-format stream-json --output-format stream-json
 ```
@@ -73,7 +74,12 @@ stdout is NDJSON:
 | --- | --- |
 | `init` | `conversation_id` |
 | `step_update` | `step_update.step_type == "agent_response"` → `text_delta` |
-| `result` | `conversation_id`, `status` (`SUCCESS` / `ERROR`), `response`, `error`, `usage`, `denied_actions[]` (`{action, display_name}`, undocumented) |
+| `step_update` (tool) | `step_type: "tool"`, `state` (`ACTIVE` / `DONE`), `tool_name`, `tool_info.parameters` (e.g. `Path`, `CommandLine`). `status` shows the latest one for running jobs. |
+| `result` | `conversation_id`, `status` (`SUCCESS` / `ERROR`), `response`, `error`, `usage`, `denied_actions[]` (`{action, display_name}`, undocumented), `structured_output` (with `--json-schema`) |
+
+With `--json-schema`, agy puts the parsed object in `result.structured_output`
+and also appends it as JSON to the end of `response`. The plugin renders
+`structured_output` and does not print `response` for structured reviews.
 
 ### Relevant flags
 
@@ -87,7 +93,8 @@ stdout is NDJSON:
 | `--conversation <id>` | Resume a specific conversation. |
 | `-c`, `--continue` | Resume the most recent conversation **globally**, which can be another repo's. The plugin does not use it; it resumes by this repo's last recorded conversation ID instead. |
 | `--log-file <path>` | Log path; the plugin keeps it per job for diagnostics. |
-| `--settings <json\|path>` | Session-only settings overrides, never saved. Read-only runs pass `{"permissions":{"deny":["write_file(*)","command(*)"]}}`. |
+| `--settings <json\|path>` | Session-only settings overrides, never saved. Read-only runs pass `{"permissions":{"deny":["write_file(*)","command(*)"]}}`. The plugin checks `agy --help` for this flag and refuses read-only runs without it. |
+| `--json-schema <json\|path>` | Ask for output matching a JSON schema; result in `result.structured_output`. `review` and the review gate pass the schema in `scripts/lib/review.mjs` when `agy --help` lists the flag. |
 
 ## Runtime behavior (verified live)
 
@@ -110,7 +117,16 @@ stdout is NDJSON:
    blocked both file writes and shell commands while reads still worked. Rule
    syntax is `action(target)`; precedence is Deny > Ask > Allow. Verified on
    1.5.13; older builds may lack `--settings`.
-6. Conversations persist as `~/.gemini/antigravity-cli/conversations/<id>.pb`.
+   - Writes blocked by these deny rules did **not** show up in `denied_actions`
+     (it was absent from the result). Don't rely on it to tell the user what a
+     read-only run was stopped from doing.
+   - **Untested: whether `--settings` merges with or replaces `settings.json`.**
+     The machine it was checked on had an empty `settings.json`, so a user's own
+     `permissions.allow` rules may or may not survive a read-only run. The deny
+     rules win either way (Deny > Allow), so read-only holds in both cases.
+7. `--sandbox` + `--settings` deny rules + `--json-schema` work together
+   (1.5.13): the write was blocked and `structured_output` held the review.
+8. Conversations persist as `~/.gemini/antigravity-cli/conversations/<id>.pb`.
 
 ## Trust the diff, not the summary
 

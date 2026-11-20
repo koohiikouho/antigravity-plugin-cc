@@ -12,6 +12,9 @@ Updated for agy 1.5.x and Windows.
 - `delegate` no longer passes `--dangerously-skip-permissions` by default. Use `--yolo` to opt in; `review` never uses it.
 - `resume` continues this repo's last recorded conversation instead of agy's global `--continue`, which could pick up another repo's thread.
 - `review` with no `--base` no longer duplicates staged changes, and works in a repo with no commits.
+- `review` and `--read-only` refuse to run, with an `agy update` hint, when `agy --help` doesn't list `--settings`. Before, they could run without the deny rules.
+- The `gemini-3-prompting` skill is now `gemini-prompting`.
+- The README banner image was removed.
 
 ### Fixed
 - `review` and `delegate --read-only` are now actually read-only. `--sandbox` only restricts the terminal and agy still wrote files; these runs now pass session deny rules for `write_file(*)` and `command(*)`.
@@ -22,6 +25,11 @@ Updated for agy 1.5.x and Windows.
 - Model-rejection errors point at `agy models`.
 - A process watchdog on top of `--print-timeout`, with process-tree kill on Windows.
 - Windows fixes: `.mjs` overrides run through node, and the test suite passes on Windows.
+- Structured reviews: `review` passes `--json-schema` and renders a verdict plus findings sorted by severity, with paths relative to the repo. Falls back to prose on an agy without the flag.
+- Optional stop-time review gate (`/antigravity:setup --enable-review-gate`): a `Stop` hook reviews uncommitted changes and sends Claude back on "needs work". Off by default, per repo, fails open.
+- `status` shows the latest tool step of running background jobs.
+- `npm run smoke`: a live end-to-end check against the real agy (opt-in, uses `gemini-4-hydrogen-low`).
+- CI runs the tests on Windows and macOS as well as Linux, and validates `hooks/hooks.json`.
 
 ### Grounded against
 - `agy` 1.5.9–1.5.13, Windows 11, November 2026. Read-only enforcement (`--settings` deny rules) was verified on 1.5.13.

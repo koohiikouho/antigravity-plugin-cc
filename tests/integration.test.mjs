@@ -233,3 +233,108 @@ test("review falls back to prose when structured output is invalid or unsupporte
 test("delegate never asks for structured output", () => {
   assert.ok(!run(["delegate", "x"]).agyArgv.includes("--json-schema"));
 });
+
+// ---------------------------------------------------------------------------
+// Stop-time review gate
+// ---------------------------------------------------------------------------
+function hook(stdinObj, { home, extraEnv = {} } = {}) {
+  const argvFile = join(tmp("agy-argv-"), "argv.json");
+  const env = {
+    ...process.env,
+    ANTIGRAVITY_CC_AGY_BIN: FAKE_AGY,
+    ANTIGRAVITY_CC_HOME: home,
+    FAKE_AGY_ARGV_FILE: argvFile,
+    FAKE_AGY_MODE: "success",
+    ...extraEnv,
+  };
+  delete env.ANTIGRAVITY_CC_MODEL;
+  // Run from an unrelated directory: the hook must use the cwd from stdin.
+  const res = spawnSync(process.execPath, [COMPANION, "review-gate-hook"], {
+    cwd: tmp("agy-hookcwd-"),
+    env,
+    input: JSON.stringify({ hook_event_name: "Stop", stop_hook_active: false, ...stdinObj }),
+    encoding: "utf8",
+  });
+  let agyArgv = null;
+  try {
+    agyArgv = JSON.parse(readFileSync(argvFile, "utf8"));
+  } catch {
+    /* agy not invoked */
+  }
+  return { code: res.status, stdout: res.stdout, agyArgv };
+}
+
+function gatedRepo(prefix) {
+  const cwd = gitRepoWithChange(prefix);
+  const home = tmp("agy-gatehome-");
+  const s = run(["setup", "--json", "--enable-review-gate"], { cwd, home });
+  assert.equal(JSON.parse(s.stdout).reviewGate, true);
+  return { cwd, home };
+}
+
+test("review gate: off by default, the hook does nothing and never runs agy", () => {
+  const cwd = gitRepoWithChange("agy-gateoff-");
+  const h = hook({ cwd }, { home: tmp("agy-gatehome-") });
+  assert.equal(h.code, 0);
+  assert.equal(h.stdout, "");
+  assert.equal(h.agyArgv, null);
+});
+
+test("review gate: needs-work blocks the stop with the findings, read-only", () => {
+  const { cwd, home } = gatedRepo("agy-gateblock-");
+  const h = hook({ cwd }, { home });
+  assert.equal(h.code, 0);
+  const decision = JSON.parse(h.stdout);
+  assert.equal(decision.decision, "block");
+  assert.match(decision.reason, /needs work/);
+  assert.match(decision.reason, /\[high\] a\.txt:1 — Real bug/);
+  assert.ok(decision.reason.indexOf("[high]") < decision.reason.indexOf("[low]"));
+  assert.match(decision.reason, /--disable-review-gate/);
+  for (const flag of ["--sandbox", "--settings", "--json-schema"]) assert.ok(h.agyArgv.includes(flag), flag);
+  assert.ok(!h.agyArgv.includes("--dangerously-skip-permissions"));
+
+  // Same diff again: already gated, agy is not run a second time.
+  const again = hook({ cwd }, { home });
+  assert.equal(again.stdout, "");
+  assert.equal(again.agyArgv, null);
+  // A changed diff is reviewed again.
+  writeFileSync(join(cwd, "a.txt"), "hello again\n");
+  assert.ok(hook({ cwd }, { home }).agyArgv);
+});
+
+test("review gate: stop_hook_active never re-runs the review (no loop)", () => {
+  const { cwd, home } = gatedRepo("agy-gateactive-");
+  const h = hook({ cwd, stop_hook_active: true }, { home });
+  assert.equal(h.stdout, "");
+  assert.equal(h.agyArgv, null);
+});
+
+test("review gate: ship lets Claude stop", () => {
+  const { cwd, home } = gatedRepo("agy-gateship-");
+  const h = hook({ cwd }, { home, extraEnv: { FAKE_AGY_VERDICT: "ship" } });
+  assert.ok(h.agyArgv, "agy ran");
+  assert.equal(h.stdout, "");
+  assert.match(run(["setup"], { cwd, home }).stdout, /Review gate \(this repo\): on · last verdict: ship/);
+});
+
+test("review gate fails open: quota, bad output, old agy", () => {
+  const { cwd, home } = gatedRepo("agy-gatefail-");
+  const q = hook({ cwd }, { home, extraEnv: { FAKE_AGY_MODE: "quota" } });
+  assert.equal(q.code, 0);
+  assert.equal(q.stdout, "");
+  const bad = hook({ cwd }, { home, extraEnv: { FAKE_AGY_STRUCTURED: "bad" } });
+  assert.equal(bad.stdout, "");
+  // Neither run recorded the diff, so a later good run still reviews it.
+  assert.ok(hook({ cwd }, { home }).stdout.includes('"block"'));
+  writeFileSync(join(cwd, "a.txt"), "changed\n");
+  const old = hook({ cwd }, { home, extraEnv: { FAKE_AGY_NO_JSON_SCHEMA: "1" } });
+  assert.equal(old.stdout, "");
+  assert.equal(old.agyArgv, null);
+});
+
+test("setup --disable-review-gate turns it off; outside a repo it changes nothing", () => {
+  const { cwd, home } = gatedRepo("agy-gatetoggle-");
+  assert.equal(JSON.parse(run(["setup", "--json", "--disable-review-gate"], { cwd, home }).stdout).reviewGate, false);
+  assert.equal(hook({ cwd }, { home }).agyArgv, null);
+  assert.match(run(["setup", "--enable-review-gate"], { home }).stdout, /not inside a git repository/);
+});

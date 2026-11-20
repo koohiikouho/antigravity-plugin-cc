@@ -39,6 +39,7 @@ jobs:
         run: |
           node -e "JSON.parse(require('fs').readFileSync('.claude-plugin/marketplace.json','utf8')); console.log('marketplace.json OK')"
           node -e "JSON.parse(require('fs').readFileSync('plugins/antigravity/.claude-plugin/plugin.json','utf8')); console.log('plugin.json OK')"
+          node -e "const h=JSON.parse(require('fs').readFileSync('plugins/antigravity/hooks/hooks.json','utf8')); if(!h.hooks||!h.hooks.Stop) throw new Error('hooks.json has no Stop hook'); console.log('hooks.json OK')"
       - name: Check every command/agent/skill file has YAML frontmatter
         run: |
           fail=0

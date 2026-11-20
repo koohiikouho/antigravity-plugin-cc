@@ -8,7 +8,7 @@
 // Subcommands: setup | delegate | review | resume | status | result | cancel
 //   (aliases: run, task -> delegate)
 
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { parseArgs, hasFlag } from "./lib/args.mjs";
@@ -30,6 +30,7 @@ import {
 import { resolveReviewTarget } from "./lib/git.mjs";
 import { REVIEW_SCHEMA, normalizeReview } from "./lib/review.mjs";
 import { createJob, writeJob, readJob, reconcile, listJobs, latestJob, cancelJob, nowIso } from "./lib/jobs.mjs";
+import { readGate, writeGate, anyGateEnabled, repoKey, hashDiff, blockReason } from "./lib/gate.mjs";
 import * as render from "./lib/render.mjs";
 
 // The prompt travels on stdin, so there is no OS command-line limit; this cap
@@ -65,6 +66,7 @@ function clampPrompt(prompt) {
 // setup
 // ---------------------------------------------------------------------------
 function cmdSetup(parsed) {
+  const gateNote = applyGateToggle(parsed);
   const bin = resolveAgyBinary();
   const configDir = agyConfigDir();
   const configExists = existsSync(configDir);
@@ -92,6 +94,8 @@ function cmdSetup(parsed) {
           : "no signed-in session detected — run `! agy` once to sign in",
     },
     models,
+    reviewGate: gateStatus(bin),
+    gateNote,
     nextSteps: [],
   };
 
@@ -114,6 +118,7 @@ function cmdSetup(parsed) {
           authedGuess,
           configDir,
           models: models.map((m) => m.slug),
+          reviewGate: report.reviewGate.enabled,
         },
         null,
         2,
@@ -123,10 +128,39 @@ function cmdSetup(parsed) {
   }
 
   if (!bin) {
-    out(render.renderNotInstalled());
+    out(`${render.renderNotInstalled()}${gateNote ? `\n${gateNote}\n` : ""}`);
     return;
   }
   out(render.renderSetup(report));
+}
+
+/** `setup --enable-review-gate` / `--disable-review-gate`, for the current repository. */
+function applyGateToggle(parsed) {
+  const enable = hasFlag(parsed, "enable-review-gate");
+  const disable = hasFlag(parsed, "disable-review-gate");
+  if (!enable && !disable) return null;
+  if (enable && disable) return "Pass only one of `--enable-review-gate` / `--disable-review-gate`. Nothing changed.";
+  const key = repoKey(process.cwd());
+  if (!key) return "The review gate is per repository, and this directory is not inside a git repository. Nothing changed.";
+  const state = readGate();
+  state.repos[key] = { ...(state.repos[key] || {}), enabled: enable };
+  writeGate(state);
+  return enable
+    ? `Review gate enabled for \`${key}\`. When Claude finishes a turn with uncommitted changes here, Antigravity reviews them (read-only) and sends Claude back to work on a "needs work" verdict. Each turn's review can take a few minutes and uses agy quota.`
+    : `Review gate disabled for \`${key}\`.`;
+}
+
+function gateStatus(bin) {
+  const key = repoKey(process.cwd());
+  const entry = key ? readGate().repos[key] : null;
+  const features = bin ? agyFeatures(bin.path) : { settings: false, jsonSchema: false };
+  return {
+    repo: key,
+    enabled: Boolean(entry?.enabled),
+    supported: Boolean(features.settings && features.jsonSchema),
+    lastVerdict: entry?.lastVerdict || null,
+    lastAt: entry?.lastAt || null,
+  };
 }
 
 function safeReaddir(dir) {
@@ -334,6 +368,72 @@ function buildReviewPrompt(target, focus) {
 }
 
 // ---------------------------------------------------------------------------
+// review gate (Stop hook)
+// ---------------------------------------------------------------------------
+const GATE_PRINT_TIMEOUT = "8m"; // + WATCHDOG_GRACE_MS stays under the hook's 600s timeout
+
+/**
+ * Called by hooks/hooks.json on Stop. Prints nothing (allow) or one JSON object
+ * `{"decision":"block","reason":...}` on stdout. Fails open: any missing piece
+ * (no agy, too old, quota, auth, timeout, bad output) lets Claude stop.
+ */
+function cmdReviewGateHook() {
+  let input = {};
+  try {
+    input = JSON.parse(readFileSync(0, "utf8") || "{}");
+  } catch {
+    /* no or bad stdin: treat as empty */
+  }
+  // Claude is already continuing because of a Stop hook: never loop.
+  if (input.stop_hook_active) return;
+
+  const state = readGate();
+  if (!anyGateEnabled(state)) return; // fast path: one file read, no git, no agy
+
+  const cwd = typeof input.cwd === "string" && input.cwd ? input.cwd : process.cwd();
+  const key = repoKey(cwd);
+  const entry = key ? state.repos[key] : null;
+  if (!entry?.enabled) return;
+
+  const bin = resolveAgyBinary();
+  if (!bin) return;
+  const features = agyFeatures(bin.path);
+  if (!features.settings || !features.jsonSchema) return;
+
+  const target = resolveReviewTarget(cwd, null);
+  if (!target.ok) return;
+  const hash = hashDiff(target.diff);
+  if (entry.lastHash === hash) return; // this exact diff was already gated
+
+  const args = buildPrintArgs({
+    model: process.env.ANTIGRAVITY_CC_MODEL || null,
+    sandbox: true,
+    settings: READ_ONLY_SETTINGS,
+    jsonSchema: REVIEW_SCHEMA,
+    addDirs: [cwd],
+    printTimeout: GATE_PRINT_TIMEOUT,
+  });
+  const run = runForeground({
+    bin: bin.path,
+    args,
+    cwd,
+    input: encodePrompt(clampPrompt(buildReviewPrompt(target, null))),
+    watchdogMs: goDurationToMs(GATE_PRINT_TIMEOUT) + WATCHDOG_GRACE_MS,
+  });
+  const outcome = interpretRun({ ...run, printTimeout: GATE_PRINT_TIMEOUT });
+  const review = outcome.ok ? normalizeReview(outcome.structured) : null;
+  if (!review) return; // no usable verdict: don't record, don't block
+
+  const fresh = readGate(); // re-read: setup may have run meanwhile
+  fresh.repos[key] = { ...(fresh.repos[key] || entry), lastHash: hash, lastVerdict: review.verdict, lastAt: nowIso() };
+  writeGate(fresh);
+
+  if (review.verdict === "needs-work") {
+    out(JSON.stringify({ decision: "block", reason: blockReason(review, (f) => render.displayPath(f, cwd)) }));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // status / result / cancel
 // ---------------------------------------------------------------------------
 function cmdStatus(parsed) {
@@ -421,7 +521,7 @@ function usage() {
       "antigravity companion — drive the Antigravity CLI (agy) from Claude Code",
       "",
       "Usage: node antigravity.mjs <subcommand> [args]",
-      "  setup [--json]",
+      "  setup [--json] [--enable-review-gate | --disable-review-gate]",
       "  delegate <task> [--background] [--model <slug>] [--effort <lvl>] [--mode <m>] [--yolo] [--sandbox] [--read-only]",
       "                  [--continue] [--conversation <id>] [--add-dir <p>] [--print-timeout <dur>]",
       "  review [--base <ref>] [--background] [--model <slug>] [focus text...]",
@@ -456,6 +556,13 @@ function main() {
       return cmdResult(parsed);
     case "cancel":
       return cmdCancel(parsed);
+    case "review-gate-hook":
+      try {
+        return cmdReviewGateHook();
+      } catch (e) {
+        warn(`review gate skipped: ${e?.message || e}`); // fail open
+        return;
+      }
     default:
       return usage();
   }
