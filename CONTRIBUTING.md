@@ -50,6 +50,13 @@ result and the companion surfaces the `RESOURCE_EXHAUSTED (429)` reset window.
 Use the cheapest model (for example `ANTIGRAVITY_CC_MODEL=gemini-4-hydrogen-low`)
 for live testing.
 
+`npm run smoke` runs the companion against your real, signed-in agy in a
+throwaway repo: setup, delegate, resume, `--read-only` (checked on disk),
+a structured review, a background job, and the review gate hook. It uses
+`gemini-4-hydrogen-low` unless `ANTIGRAVITY_CC_MODEL` says otherwise, takes a
+minute or two, and spends a little quota. It is not part of `npm test` or CI.
+Run it before a release, or after a change to how agy is invoked or parsed.
+
 ## Keep the contract in sync
 
 `docs/antigravity-cli-reference.md` and `scripts/lib/agy.mjs` describe the same
