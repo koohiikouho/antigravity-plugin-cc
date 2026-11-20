@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -262,4 +262,19 @@ test("readOnlySettings: invalid settings.json is ignored", () => {
   assert.deepEqual(readOnlySettings(dir).permissions.deny, [...READ_ONLY_SETTINGS.permissions.deny]);
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ permissions: { deny: "nope" } }));
   assert.deepEqual(readOnlySettings(dir).permissions.deny, [...READ_ONLY_SETTINGS.permissions.deny]);
+});
+
+test("displayPath: matches a file reported under the resolved cwd (symlinked dir)", (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "agy-dp-")));
+  const real = join(base, "real");
+  mkdirSync(real);
+  const link = join(base, "link");
+  try {
+    symlinkSync(real, link, "junction");
+  } catch {
+    t.skip("cannot create symlinks here");
+    return;
+  }
+  assert.equal(displayPath(join(real, "a.txt"), link), "a.txt");
+  assert.equal(displayPath(join(base, "elsewhere.txt"), link), join(base, "elsewhere.txt"));
 });

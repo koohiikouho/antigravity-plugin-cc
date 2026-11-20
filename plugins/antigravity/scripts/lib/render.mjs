@@ -1,5 +1,7 @@
 // Render companion output as Markdown that Claude relays to the user verbatim.
 
+import { realpathSync } from "node:fs";
+
 function ensureTrailingNewline(s) {
   return s.endsWith("\n") ? s : `${s}\n`;
 }
@@ -51,10 +53,19 @@ export function displayPath(file, cwd) {
   if (!f || !cwd) return f;
   const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
   const nf = norm(f);
-  const prefix = `${norm(String(cwd))}/`;
-  const ci = /^[a-z]:\//i.test(prefix); // Windows paths compare case-insensitively
-  const head = nf.slice(0, prefix.length);
-  if (ci ? head.toLowerCase() === prefix.toLowerCase() : head === prefix) return nf.slice(prefix.length);
+  // agy may report the resolved path (macOS: /var → /private/var), so try both.
+  const roots = [String(cwd)];
+  try {
+    roots.push(realpathSync(String(cwd)));
+  } catch {
+    // cwd gone or unreadable: compare against it as given
+  }
+  for (const root of roots) {
+    const prefix = `${norm(root)}/`;
+    const ci = /^[a-z]:\//i.test(prefix); // Windows paths compare case-insensitively
+    const head = nf.slice(0, prefix.length);
+    if (ci ? head.toLowerCase() === prefix.toLowerCase() : head === prefix) return nf.slice(prefix.length);
+  }
   return f;
 }
 
