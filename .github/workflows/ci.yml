@@ -7,18 +7,27 @@ on:
 
 jobs:
   test:
-    name: test (node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         node: ["18", "20", "22"]
+        include:
+          # The plugin shipped broken on Windows once; keep it covered.
+          - os: windows-latest
+            node: "22"
+          - os: macos-latest
+            node: "22"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
       - name: Run tests (no external deps, no auth needed)
+        # bash on every OS so the glob expands (Node 18 does not expand it itself).
+        shell: bash
         run: node --test tests/*.test.mjs
 
   validate-manifests:
