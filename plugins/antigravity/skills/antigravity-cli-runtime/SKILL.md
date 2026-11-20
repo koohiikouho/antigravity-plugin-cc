@@ -14,7 +14,7 @@ Internal contract for the `antigravity:antigravity-pair` subagent. Not user-faci
 node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity.mjs" delegate "<task>" [flags]
 ```
 
-`delegate` hands the task to Google's Antigravity CLI (`agy`, Gemini 3.5) non-interactively via `agy -p`. It is **write-capable by default** — it can edit files and run commands in this repo. Contain it with `--read-only` or `--sandbox` when the task should not mutate the working tree.
+`delegate` hands the task to Google's Antigravity CLI (`agy`) non-interactively. The companion feeds the prompt on stdin (stream-json), so long tasks are fine. It is **write-capable by default**: it can edit files and run commands that agy's own permission rules allow. Tool requests that would need approval are auto-denied in headless mode and reported in the output. Use `--read-only` when the task should not mutate the working tree; `--sandbox` alone does not stop file edits.
 
 ## The one rule: thin forwarder
 
@@ -25,23 +25,26 @@ The subagent makes **exactly one** Bash call to `delegate` and returns its stdou
 - Do not chain calls or call any other subcommand.
 - Pass the user's task and any caller-supplied flags straight through.
 
-The companion owns binary detection, sandboxing, timeouts, the conversation id, and quota handling (on `RESOURCE_EXHAUSTED` it surfaces the reset window recovered from the log). The subagent's job is to forward and relay.
+The companion owns binary detection, sandboxing, timeouts, the conversation id, and error handling (quota with its reset window, auth, bad model, headless auto-denials). The subagent's job is to forward and relay.
 
 ## Flags on `delegate`
 
 | Flag | Effect |
 |------|--------|
 | `--background` | Spawn a background job; returns a job id instead of blocking. |
-| `--sandbox` | Run contained — no host writes. |
-| `--read-only` | Allow reads, block edits/commands. |
-| `--continue`, `-c` | Continue the most recent Antigravity conversation. |
+| `--sandbox` | Run with agy's terminal sandbox. Restricts commands only; file edits still happen. |
+| `--read-only` | Sandboxed, never auto-approved, and file writes and shell commands are denied. For look-but-don't-touch runs. |
+| `--yolo` | Auto-approve every tool (`--dangerously-skip-permissions`). Only when the user explicitly asks; ignored with `--read-only`. |
+| `--model <slug>` | Model for this run, e.g. `gemini-4-hydrogen-low`. Only when the user names one. |
+| `--effort <level>` | Reasoning effort; only with a bare model name, never with an effort-encoded slug. |
+| `--continue`, `-c` | Continue this repo's last Antigravity conversation. |
 | `--conversation <id>` | Continue a specific conversation by id. |
 | `--add-dir <path>` | Grant access to an extra directory (repeatable). |
 | `--print-timeout <go-dur>` | Cap the print-mode run, e.g. `10m`, `90s`. |
 
-## No model flag — ever
+## Model selection
 
-`agy` has **no** `--model` / `-m` flag. The model (default Gemini 3.5 Flash) is selected with `/model` inside the `agy` TUI and persisted in `settings.json`. Never add a model flag to a `delegate` call and never tell the user to pass one.
+`agy` takes `--model <slug>`; `agy models` (or `/antigravity:setup`) lists the slugs for the account. Without `--model`, agy uses the `ANTIGRAVITY_CC_MODEL` env var if set, else the default chosen with `/model` in the `agy` TUI. Only pass `--model` when the user names a model; do not invent slugs.
 
 ## Other subcommands (not for this subagent)
 

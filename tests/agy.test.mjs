@@ -1,22 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrintArgs, goDurationToMs } from "../plugins/antigravity/scripts/lib/agy.mjs";
+import {
+  buildPrintArgs,
+  encodePrompt,
+  goDurationToMs,
+  launchSpec,
+  parseAgyStream,
+  detectDenial,
+  interpretRun,
+} from "../plugins/antigravity/scripts/lib/agy.mjs";
 
-test("buildPrintArgs puts -p <prompt> LAST", () => {
+test("buildPrintArgs: flags in order, stream-json last, no prompt in argv", () => {
   const args = buildPrintArgs({
-    prompt: "do the thing",
-    yolo: true,
-    logFile: "/tmp/x.log",
-    printTimeout: "10m",
-    addDirs: ["/repo"],
-  });
-  assert.equal(args[args.length - 2], "-p");
-  assert.equal(args[args.length - 1], "do the thing");
-});
-
-test("buildPrintArgs includes expected flags in order (flags before prompt)", () => {
-  const args = buildPrintArgs({
-    prompt: "p",
+    model: "gemini-4-hydrogen-low",
+    mode: "accept-edits",
     sandbox: true,
     yolo: true,
     addDirs: ["/a", "/b"],
@@ -25,6 +22,10 @@ test("buildPrintArgs includes expected flags in order (flags before prompt)", ()
     printTimeout: "5m",
   });
   assert.deepEqual(args, [
+    "--model",
+    "gemini-4-hydrogen-low",
+    "--mode",
+    "accept-edits",
     "--sandbox",
     "--dangerously-skip-permissions",
     "--add-dir",
@@ -37,14 +38,35 @@ test("buildPrintArgs includes expected flags in order (flags before prompt)", ()
     "/l",
     "--print-timeout",
     "5m",
-    "-p",
-    "p",
+    "--input-format",
+    "stream-json",
+    "--output-format",
+    "stream-json",
   ]);
+  assert.ok(!args.includes("-p"));
+  assert.ok(!args.includes("--continue"));
 });
 
-test("continueLast adds --continue", () => {
-  const args = buildPrintArgs({ prompt: "x", continueLast: true });
-  assert.ok(args.includes("--continue"));
+test("buildPrintArgs: no yolo / sandbox / model unless asked", () => {
+  const args = buildPrintArgs({});
+  assert.deepEqual(args, ["--input-format", "stream-json", "--output-format", "stream-json"]);
+});
+
+test("buildPrintArgs: settings are serialized as one --settings json arg", () => {
+  const args = buildPrintArgs({ settings: { permissions: { deny: ["write_file(*)"] } } });
+  assert.equal(args[args.indexOf("--settings") + 1], '{"permissions":{"deny":["write_file(*)"]}}');
+});
+
+test("encodePrompt produces one stream-json user event line", () => {
+  const line = encodePrompt('say "hi"\nplease');
+  assert.ok(line.endsWith("\n"));
+  assert.deepEqual(JSON.parse(line), { event: "user", message: { content: 'say "hi"\nplease' } });
+});
+
+test("launchSpec runs script overrides through node, binaries directly", () => {
+  assert.deepEqual(launchSpec("/x/fake.mjs", ["a"]), { cmd: process.execPath, args: ["/x/fake.mjs", "a"] });
+  assert.deepEqual(launchSpec("C:/agy/bin/agy.exe", ["a"]), { cmd: "C:/agy/bin/agy.exe", args: ["a"] });
+  assert.deepEqual(launchSpec("/usr/bin/agyjs", []), { cmd: "/usr/bin/agyjs", args: [] });
 });
 
 test("goDurationToMs parses composite and simple durations", () => {
@@ -52,9 +74,104 @@ test("goDurationToMs parses composite and simple durations", () => {
   assert.equal(goDurationToMs("90s"), 90000);
   assert.equal(goDurationToMs("10m"), 600000);
   assert.equal(goDurationToMs("1h"), 3600000);
+  assert.equal(goDurationToMs("1h30m"), 5400000);
+  assert.equal(goDurationToMs("500ms"), 500);
 });
 
 test("goDurationToMs falls back on garbage", () => {
   assert.equal(goDurationToMs("not-a-duration", 123), 123);
   assert.equal(goDurationToMs("", 456), 456);
+});
+
+const CID = "abcd1234-ef56-7890-abcd-1234567890ef";
+const ev = (o) => JSON.stringify(o);
+
+test("parseAgyStream reads init, deltas and result; skips noise", () => {
+  const stdout = [
+    "warning: not json",
+    ev({ event: "init", conversation_id: CID }),
+    ev({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "Hel" } }),
+    ev({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "lo" } }),
+    ev({ event: "result", result: { conversation_id: CID, status: "SUCCESS", response: "Hello" } }),
+  ].join("\n");
+  const r = parseAgyStream(stdout);
+  assert.equal(r.conversationId, CID);
+  assert.equal(r.streamedText, "Hello");
+  assert.equal(r.result.response, "Hello");
+});
+
+test("parseAgyStream accepts a bare json envelope", () => {
+  const r = parseAgyStream(ev({ conversation_id: CID, status: "SUCCESS", response: "ok" }));
+  assert.equal(r.result.status, "SUCCESS");
+  assert.equal(r.conversationId, CID);
+});
+
+test("detectDenial reads denied_actions and the stderr notice", () => {
+  const d = detectDenial(
+    { denied_actions: [{ action: "command", display_name: "Run command" }] },
+    "some noise\nno output produced — a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied.",
+  );
+  assert.deepEqual(d.actions, ["Run command"]);
+  assert.match(d.notice, /auto-denied/);
+  assert.equal(detectDenial({ status: "SUCCESS" }, "all fine"), null);
+});
+
+test("interpretRun: success", () => {
+  const o = interpretRun({
+    code: 0,
+    stdout: ev({ event: "result", result: { conversation_id: CID, status: "SUCCESS", response: "done" } }),
+  });
+  assert.equal(o.ok, true);
+  assert.equal(o.response, "done");
+  assert.equal(o.conversationId, CID);
+});
+
+test("interpretRun: soft-deny with empty response is a denied failure, not silent success", () => {
+  const o = interpretRun({
+    code: 0,
+    stdout: ev({ event: "result", result: { status: "SUCCESS", response: "", denied_actions: [{ action: "command" }] } }),
+    stderr: "a tool required the \"command\" permission that headless mode cannot prompt for, so it was auto-denied",
+  });
+  assert.equal(o.ok, false);
+  assert.equal(o.error.kind, "denied");
+});
+
+test("interpretRun: answer plus a denial stays ok but keeps the denial", () => {
+  const o = interpretRun({
+    code: 0,
+    stdout: ev({ event: "result", result: { status: "SUCCESS", response: "partial", denied_actions: [{ action: "command" }] } }),
+  });
+  assert.equal(o.ok, true);
+  assert.deepEqual(o.denial.actions, ["command"]);
+});
+
+test("interpretRun: quota error on result + stderr, non-zero exit", () => {
+  const o = interpretRun({
+    code: 1,
+    stdout: ev({ event: "result", result: { status: "ERROR", error: "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 1h2m3s." } }),
+  });
+  assert.equal(o.ok, false);
+  assert.equal(o.error.kind, "quota");
+  assert.equal(o.error.resetsIn, "1h2m3s");
+});
+
+test("interpretRun: bad model and effort conflict are model errors", () => {
+  const a = interpretRun({ code: 1, stderr: 'invalid model selection: "gemini-9" is not recognized as a known model' });
+  assert.equal(a.error.kind, "model");
+  const b = interpretRun({ code: 1, stderr: "--model gemini-4-hydrogen-low conflicts with --effort low" });
+  assert.equal(b.error.kind, "model");
+});
+
+test("interpretRun: non-zero exit with no result is a backend error with stderr", () => {
+  const o = interpretRun({ code: 3, stdout: "", stderr: "panic: something odd\nstack..." });
+  assert.equal(o.ok, false);
+  assert.equal(o.error.kind, "backend");
+  assert.match(o.error.message, /panic: something odd/);
+});
+
+test("interpretRun: spawn error and timeout win over everything", () => {
+  assert.equal(interpretRun({ error: "spawn ENOENT" }).error.kind, "spawn");
+  const t = interpretRun({ timedOut: true, printTimeout: "10m" });
+  assert.equal(t.error.kind, "timeout");
+  assert.match(t.error.message, /10m/);
 });

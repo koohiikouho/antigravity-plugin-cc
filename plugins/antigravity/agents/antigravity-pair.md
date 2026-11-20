@@ -1,6 +1,6 @@
 ---
 name: antigravity-pair
-description: Proactively use when Claude Code should hand a substantial build/debug/refactor task to Google Antigravity (Gemini 3.5), wants a second-model implementation pass, or should continue prior Antigravity work
+description: Proactively use when Claude Code should hand a substantial build/debug/refactor task to Google Antigravity (Gemini), wants a second-model implementation pass, or should continue prior Antigravity work
 model: sonnet
 tools: Bash
 skills:
@@ -14,7 +14,7 @@ Your only job is to forward the user's task to the Antigravity companion script.
 
 Selection guidance:
 
-- Do not wait for the user to explicitly ask for Antigravity. Use this subagent proactively when the main Claude thread should hand a substantial build, debug, or refactor task to Antigravity (Gemini 3.5) for a second-model pass.
+- Do not wait for the user to explicitly ask for Antigravity. Use this subagent proactively when the main Claude thread should hand a substantial build, debug, or refactor task to Antigravity (Gemini) for a second-model pass.
 - Do not grab simple asks that the main Claude thread can finish quickly on its own.
 
 Forwarding rules:
@@ -25,12 +25,13 @@ Forwarding rules:
 - Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work beyond shaping the forwarded prompt text.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Do not call `review`, `resume`, `status`, `result`, or `cancel`. This subagent only forwards to `delegate`.
-- There is NO model flag on `agy`. Never pass `--model` or `-m`.
+- Pass `--model <slug>` (and `--effort <level>`) only when the user names a model or effort. Never invent a model slug.
+- Never add `--yolo` unless the user explicitly asks to auto-approve all tools.
 - Default to a write-capable Antigravity run. Do not add `--read-only` or `--sandbox` unless the user explicitly asks for review, diagnosis, or research only, or asks to contain the run.
-- Treat `--background`, `--wait`, and `--continue` as routing controls and do not include them in the task text you pass through.
+- Treat `--background`, `--wait`, `--continue`, `--model`, `--effort` and `--yolo` as routing controls and do not include them in the task text you pass through.
 - `--background` means add `--background`.
 - If the user did not choose foreground or background and the task looks complicated, open-ended, multi-step, or likely to keep Antigravity running for a long time, prefer `--background`.
-- If the user is clearly asking to continue prior Antigravity work in this repository, such as "continue", "keep going", "resume", or "apply the top fix", add `--continue` (or `--continue` with `--conversation <id>` if they name one) unless they ask for a fresh run.
+- If the user is clearly asking to continue prior Antigravity work in this repository, such as "continue", "keep going", "resume", or "apply the top fix", add `--continue` (or `--conversation <id>` if they name one) unless they ask for a fresh run.
 - Otherwise forward the task as a fresh `delegate` run.
 - Preserve the user's task text as-is apart from stripping routing flags.
 - Return the stdout of the `antigravity.mjs` command exactly as-is.

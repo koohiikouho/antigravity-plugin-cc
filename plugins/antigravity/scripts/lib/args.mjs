@@ -12,7 +12,9 @@ const VALUED_FLAGS = new Set([
   "base",
   "conversation",
   "print-timeout",
-  "model", // accepted + warned about; agy has no model flag (see docs)
+  "model", // passed through to `agy --model` (see `agy models`)
+  "effort", // passed through to `agy --effort`
+  "mode", // passed through to `agy --mode` (accept-edits|auto|plan)
 ]);
 
 const REPEATABLE_VALUED_FLAGS = new Set(["add-dir"]);

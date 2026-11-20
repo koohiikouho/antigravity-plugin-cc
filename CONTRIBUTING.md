@@ -1,7 +1,7 @@
 # Contributing to antigravity-plugin-cc
 
 Thanks for helping out. This plugin lets Claude Code users drive Google's
-Antigravity CLI (`agy`, powered by Gemini 3.5) without leaving Claude Code.
+Antigravity CLI (`agy`, powered by Gemini) without leaving Claude Code.
 Contributions that keep it thin, honest, and dependency-free are very welcome.
 
 ## Repo layout
@@ -38,16 +38,17 @@ a Google account, or any network access. Everything is offline.
      (lands in `~/.local/bin/agy`)
    - Windows: `irm https://antigravity.google/cli/install.ps1 | iex`
 2. Sign in once, interactively. Auth is keyring/browser OAuth — there is no API
-   key for the preview tier. In Claude Code, type `! agy` and complete the
+   key. In Claude Code, type `! agy` and complete the
    Google login. The plugin never authenticates for you.
 3. Add this checkout as a local marketplace:
    `/plugin marketplace add /absolute/path/to/antigravity-plugin-cc`
 4. Try `/antigravity:setup`, then `/antigravity:delegate`, `/antigravity:review`,
    and `/antigravity:resume`.
 
-Heads up: the preview tier has a quota. When it's exhausted, `agy` exits 0 with
-empty stdout and the companion surfaces the `RESOURCE_EXHAUSTED (429)` line from
-the `--log-file`. That's expected behavior, not a bug.
+Heads up: agy has a usage quota. When it's exhausted, agy returns an error
+result and the companion surfaces the `RESOURCE_EXHAUSTED (429)` reset window.
+Use the cheapest model (for example `ANTIGRAVITY_CC_MODEL=gemini-4-hydrogen-low`)
+for live testing.
 
 ## Keep the contract in sync
 
@@ -59,11 +60,14 @@ plugin for everyone.
 
 A few facts that must stay true (don't contradict them):
 
-- The binary is `agy`. Print mode is `agy -p`.
-- There is **no** `--model` / `-m` flag. The model is picked with `/model`
-  inside `agy` and persisted in `settings.json`. Never tell users to pass one.
+- The binary is `agy`. The companion runs it with `--input-format stream-json
+  --output-format stream-json` and writes the prompt to stdin, never argv.
+- `--model` is passed through as given. Don't hardcode or validate model names;
+  `agy models` is the source of truth.
 - `delegate` is write-capable by default; `--read-only` / `--sandbox` contain it.
-- `review` is always read-only and sandboxed.
+  `--dangerously-skip-permissions` is only passed when the user asks for `--yolo`.
+- `review` is always sandboxed and never auto-approves tools.
+- `resume` uses this repo's last conversation ID, never agy's global `--continue`.
 
 ## Code style
 
@@ -74,7 +78,7 @@ A few facts that must stay true (don't contradict them):
 - Command/agent/skill files follow the Claude Code conventions already in the
   repo — copy the frontmatter shape from an existing file rather than inventing.
 - Voice in user-facing text: crisp and concrete, lead with what the user gets,
-  honest about limits (preview quota, browser auth), no hype words.
+  honest about limits (quota, browser auth, headless denials), no hype words.
 
 ## Opening a PR
 

@@ -16,11 +16,32 @@ function resumeFooter({ conversationId, jobId } = {}) {
   return lines;
 }
 
-/** Successful agy response (delegate / resume). The model text leads. */
+function denialHint(meta = {}) {
+  if (meta.readOnly) {
+    return "This was a read-only run: the plugin denies file writes and commands for it (a \"user-configured deny rule\" in agy's words). Re-run with `/antigravity:delegate` without `--read-only` if it needs to change files or run commands.";
+  }
+  return "Allow the action with a rule under `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`, or re-run with `--yolo` to auto-approve every tool (only in a repo you trust).";
+}
+
+function denialLines(denial, meta = {}) {
+  if (!denial) return [];
+  const what = denial.actions?.length ? denial.actions.join(", ") : "a tool action";
+  const lines = ["", `> ⚠️ Headless mode auto-denied: **${what}**. The answer may be incomplete.`];
+  if (denial.notice) lines.push(`> ${denial.notice.split("\n")[0]}`);
+  lines.push(`> ${denialHint(meta)}`);
+  return lines;
+}
+
+/** Successful agy response (delegate / resume / review). The model text leads. */
 export function renderResponse(responseText, meta = {}) {
   const body = (responseText || "").trim();
   const header = meta.title ? [`# 🛰️ Antigravity — ${meta.title}`, ""] : ["# 🛰️ Antigravity", ""];
-  const lines = [...header, body || "_(Antigravity returned an empty response.)_", ...resumeFooter(meta)];
+  const lines = [
+    ...header,
+    body || "_(Antigravity returned an empty response.)_",
+    ...denialLines(meta.denial, meta),
+    ...resumeFooter(meta),
+  ];
   return ensureTrailingNewline(lines.join("\n").trimEnd());
 }
 
@@ -28,7 +49,7 @@ export function renderResponse(responseText, meta = {}) {
 export function renderError(error, meta = {}) {
   const lines = [`# 🛰️ Antigravity — ${meta.title || "error"}`, ""];
   if (!error) {
-    lines.push("Antigravity returned no output and no recognizable error was found in the log.");
+    lines.push("Antigravity returned no output and no recognizable error was found (stdout, stderr or log).");
     if (meta.logFile) lines.push("", `Log: \`${meta.logFile}\``);
     return ensureTrailingNewline(lines.join("\n").trimEnd());
   }
@@ -46,8 +67,28 @@ export function renderError(error, meta = {}) {
     lines.push("**Antigravity is not authenticated.**");
     lines.push("", "Run this once in your shell to sign in, then retry:", "", "```bash", "agy", "```");
     lines.push("(In Claude Code you can run it inline by typing `! agy`.)");
+  } else if (error.kind === "denied") {
+    lines.push("**Antigravity produced no answer: a tool action was auto-denied in headless mode.**");
+    if (error.message) lines.push("", "```text", error.message, "```");
+    lines.push("", denialHint(meta));
+  } else if (error.kind === "model") {
+    lines.push("**agy rejected the model selection.**", "", "```text", error.message, "```");
+    lines.push(
+      "",
+      "Use a slug from `agy models` (e.g. `gemini-4-hydrogen-low`, `gemini-4-neon-high`). Slugs already encode effort, so drop `--effort` when using one.",
+    );
+  } else if (error.kind === "timeout") {
+    lines.push(`**${error.message}**`, "", "Try `--print-timeout 20m`, or run with `--background`.");
+  } else if (error.kind === "cancelled") {
+    lines.push("**The job was cancelled.**");
+  } else if (error.kind === "spawn") {
+    lines.push("**Could not start `agy`.**", "", "```text", error.message, "```");
   } else {
     lines.push("**Antigravity backend error.**", "", "```text", error.message, "```");
+  }
+
+  if (meta.partialResponse) {
+    lines.push("", "Partial response before the failure:", "", meta.partialResponse.trim());
   }
 
   if (meta.conversationId) lines.push("", `Conversation: \`${meta.conversationId}\``);
@@ -89,6 +130,11 @@ export function renderSetup(report) {
     `- auth: ${report.auth.detail}`,
     "",
   ];
+  if (report.models?.length) {
+    lines.push("Models (pass with `--model <slug>`):");
+    for (const m of report.models) lines.push(`- \`${m.slug}\` — ${m.name}`);
+    lines.push("");
+  }
   if (report.nextSteps.length) {
     lines.push("Next steps:");
     for (const step of report.nextSteps) lines.push(`- ${step}`);
@@ -100,7 +146,7 @@ export function renderBackgroundStarted(job) {
   const lines = [
     `# 🛰️ Antigravity — started in background`,
     "",
-    `Job \`${job.id}\` (${job.kind}) is running with Gemini 3.`,
+    `Job \`${job.id}\` (${job.kind}) is running${job.model ? ` on \`${job.model}\`` : ""}.`,
     job.title ? `Task: ${job.title}` : "",
     "",
     "Check on it:",
@@ -150,6 +196,7 @@ export function renderJobStatus(job) {
     `Started: ${job.startedAt}`,
     job.finishedAt ? `Finished: ${job.finishedAt}` : "",
     job.error ? `Error: ${job.error}` : "",
+    job.denial ? `Auto-denied: ${job.denial.actions?.join(", ") || "a tool action"}` : "",
   ].filter(Boolean);
   if (job.status === "running") {
     lines.push("", `Get the result when done: \`/antigravity:result ${job.id}\``);

@@ -47,21 +47,31 @@ export function resolveReviewTarget(cwd, base) {
     };
   }
 
-  // Uncommitted changes against HEAD (staged + unstaged), plus untracked file names.
-  const tracked = git(["diff", "--no-color", "HEAD"], cwd).stdout;
-  const staged = git(["diff", "--no-color", "--cached"], cwd).stdout;
-  const stat = git(["diff", "--stat", "HEAD"], cwd).stdout;
+  // Uncommitted changes, plus untracked file names. `git diff HEAD` already
+  // contains staged + unstaged changes, so staged changes are not appended again.
+  // A repo with no commits has no HEAD: diff the index against the empty tree
+  // (staged) and the working tree against the index (unstaged) instead.
+  const hasHead = git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd).ok;
   const untracked = git(["ls-files", "--others", "--exclude-standard"], cwd).stdout;
-
   const parts = [];
-  if (tracked) parts.push(tracked);
-  if (staged && staged !== tracked) parts.push(`\n# Staged changes:\n${staged}`);
+  let stat;
+  if (hasHead) {
+    const tracked = git(["diff", "--no-color", "HEAD"], cwd).stdout;
+    stat = git(["diff", "--stat", "HEAD"], cwd).stdout;
+    if (tracked) parts.push(tracked);
+  } else {
+    const staged = git(["diff", "--no-color", "--cached"], cwd).stdout;
+    const unstaged = git(["diff", "--no-color"], cwd).stdout;
+    stat = [git(["diff", "--stat", "--cached"], cwd).stdout, git(["diff", "--stat"], cwd).stdout].filter(Boolean).join("\n");
+    if (staged) parts.push(staged);
+    if (unstaged) parts.push(`\n# Unstaged changes:\n${unstaged}`);
+  }
   if (untracked) parts.push(`\n# Untracked files (not shown in diff):\n${untracked}`);
   const diff = parts.join("\n");
 
   return {
     ok: diff.trim().length > 0,
-    label: "uncommitted changes (HEAD)",
+    label: hasHead ? "uncommitted changes (HEAD)" : "uncommitted changes (no commits yet)",
     diff,
     stat,
     reason: diff.trim().length === 0 ? "no uncommitted changes to review" : undefined,

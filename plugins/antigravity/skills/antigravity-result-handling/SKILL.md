@@ -1,6 +1,6 @@
 ---
 name: antigravity-result-handling
-description: "How to interpret Antigravity companion output — successful responses, quota/auth/backend errors, and applying file changes"
+description: "How to interpret Antigravity companion output — successful responses, auto-denials, quota/auth/model/backend errors, and applying file changes"
 user-invocable: false
 ---
 
@@ -10,16 +10,16 @@ The companion (`scripts/antigravity.mjs`) wraps the `agy` binary and returns Mar
 
 Two things to remember before anything else:
 
-- **`delegate` is write-capable.** Unless the call used `--read-only` or `--sandbox`, Antigravity (Gemini 3.5) may have already edited files or run commands in the repo. Changes can be on disk right now. Verify with `git diff` / `git status` before you describe or trust them.
+- **`delegate` is write-capable.** Unless the call used `--read-only` or `--sandbox`, Antigravity may have already edited files or run commands in the repo. Changes can be on disk right now. Verify with `git diff` / `git status` before you describe or trust them. Antigravity's summaries have claimed tests passed or files changed when they had not, so re-run the tests yourself before reporting them green.
 - **Every finished response carries a conversation id footer.** That id is what enables `/antigravity:resume` and the raw `agy --conversation <id>`. Always surface it when present.
 
 ---
 
 ## Case 1 — Normal response
 
-The common case: Gemini 3.5 answered.
+The common case: Antigravity answered.
 
-1. **Lead with Gemini's answer.** Put the substance first. Don't bury it under your own preamble or restate the contract. The developer asked Antigravity a question — give them the answer.
+1. **Lead with Antigravity's answer.** Put the substance first. Don't bury it under your own preamble or restate the contract. The developer asked Antigravity a question — give them the answer.
 2. **If it touched files, verify before you summarize.** Run `git diff` (or `git status` for new/deleted files) and describe what actually changed, not what the output claims changed. If the diff is large, summarize by file and intent. If a change looks wrong or risky, say so plainly and point at the exact hunk.
 3. **If it ran commands**, note what ran and the outcome.
 4. **Surface the conversation id footer.** Tell the developer they can continue this thread with `/antigravity:resume` (or `agy --conversation <id>` directly). This matters most when the task is half-done or worth iterating on.
@@ -28,9 +28,19 @@ If `delegate` ran with `--read-only` or `--sandbox`, there are no on-disk change
 
 ---
 
+## Case 1b — Headless auto-denial
+
+In print mode agy cannot ask for permission, so a tool request that needs approval is **auto-denied**. The companion shows `⚠️ Headless mode auto-denied: <action>` under the answer, or reports that no answer was produced.
+
+- Tell the developer which action was denied and that the answer may be incomplete.
+- For `delegate`, the fixes are an allow rule under `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`, or re-running with `--yolo` (auto-approves every tool; only in a trusted repo). Don't add `--yolo` yourself.
+- For `review` / `--read-only` runs, denials are expected. The plugin itself adds deny rules for file writes and commands, which agy reports as a "user-configured deny rule". Don't send the user to their own `settings.json` for these; suggest `/antigravity:delegate` without `--read-only` if the task really needs to change files or run commands.
+
+---
+
 ## Case 2 — Quota exhausted (RESOURCE_EXHAUSTED / 429)
 
-On the preview tier, `agy` exits 0 with **empty stdout** when quota runs out. The companion catches this by scanning the log file and surfaces a line like:
+On quota exhaustion `agy` returns an error result. The companion surfaces it with the reset window, like:
 
 ```
 RESOURCE_EXHAUSTED (429) ... Resets in <dur>
@@ -39,10 +49,9 @@ RESOURCE_EXHAUSTED (429) ... Resets in <dur>
 When you see this:
 
 - Tell the developer their Antigravity quota is exhausted, and quote the reset window (`Resets in <dur>`).
-- Offer the realistic options: **wait** for the reset, or **switch to another Google account** and re-auth (`! agy`, then `/model` if needed).
+- Offer the realistic options: **wait** for the reset, try a different model with `--model` (quotas can differ per model), or **switch to another Google account** and re-auth (`! agy`).
 - Make clear **Claude can keep working in the meantime** — the quota limit is on Antigravity/Gemini, not on you. Don't stall the developer waiting on a second model.
 
-There is no API key and no paid override for the preview tier, so don't suggest one.
 
 ---
 
@@ -57,7 +66,13 @@ Don't try to authenticate for them and don't ask for credentials.
 
 ---
 
-## Case 4 — Backend or timeout error
+## Case 4 — Model rejected
+
+If agy rejects `--model` (unknown slug, or `--effort` combined with an effort-encoded slug), relay the message and point at `/antigravity:setup` or `agy models` for valid slugs. Don't guess a replacement model.
+
+---
+
+## Case 5 — Backend or timeout error
 
 Other failures — backend errors, network issues, or a print run that hit `--print-timeout` before finishing — should be surfaced verbatim, not swallowed.
 
@@ -69,9 +84,9 @@ Other failures — backend errors, network issues, or a print run that hit `--pr
 
 ## The conversation id footer
 
-When the companion can recover a conversation id (it pulls this from `agy`'s log even when stdout is empty), it prints it in a footer. Treat it as the thread handle:
+When the companion can recover a conversation id (from agy's stream-json output), it prints it in a footer. Treat it as the thread handle:
 
-- `/antigravity:resume <follow-up>` continues the most recent conversation, or a specific one with `--conversation <id>`.
+- `/antigravity:resume <follow-up>` continues this repo's most recent conversation, or a specific one with `--conversation <id>`.
 - `agy --conversation <id>` opens the same thread directly in the TUI.
 
 Pass the id along whenever the work isn't obviously finished — it's the cheapest way for the developer to keep going with the same context.
@@ -83,7 +98,9 @@ Pass the id along whenever the work isn't obviously finished — it's the cheape
 | Signal in output | What it means | What you do |
 |---|---|---|
 | Answer text + (maybe) diff | Normal response | Lead with the answer; `git diff` to verify any file edits; surface conversation id |
-| `RESOURCE_EXHAUSTED (429) ... Resets in <dur>` | Preview quota gone | Report reset window; suggest wait or switch account; note Claude can continue |
+| `Headless mode auto-denied: ...` | A tool needed approval | Say what was denied; suggest `permissions.allow` or `--yolo` (delegate only) |
+| `RESOURCE_EXHAUSTED (429) ... Resets in <dur>` | Quota gone | Report reset window; suggest wait, another model or account; note Claude can continue |
+| `agy rejected the model selection` | Bad `--model` / `--effort` | Point at `agy models`; don't guess |
 | Auth error / never signed in | Not logged into Google | Tell them to run `! agy` once, then re-run |
 | Backend error / timeout | Run failed or ran out of time | Surface verbatim; suggest higher `--print-timeout` or `--background` |
 | Conversation id footer | Thread handle | Offer `/antigravity:resume` or `agy --conversation <id>` |
