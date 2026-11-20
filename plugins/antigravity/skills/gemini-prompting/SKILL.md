@@ -1,5 +1,5 @@
 ---
-name: gemini-3-prompting
+name: gemini-prompting
 description: "How to write effective prompts for Google Antigravity / Gemini agents (used when delegating to or reviewing with the antigravity plugin)"
 ---
 
@@ -8,8 +8,8 @@ description: "How to write effective prompts for Google Antigravity / Gemini age
 You drive `agy` (Antigravity, Gemini) in print mode through the companion's `delegate`, `review`, and `resume` subcommands. Print mode is headless: one prompt in, one result out. The agent cannot stop to ask you a clarifying question, so the prompt you send is the whole brief. Write it like a work order for a fast, literal junior engineer.
 
 This guide is the short version. The depth lives in two reference files:
-- **[Recipes](references/gemini-3-recipes.md)** — copy-paste templates for fixes, features, review, investigation, refactor, and tests.
-- **[Anti-patterns](references/gemini-3-antipatterns.md)** — the common mistakes and their fixes.
+- **[Recipes](references/gemini-recipes.md)** — copy-paste templates for fixes, features, review, investigation, refactor, and tests.
+- **[Anti-patterns](references/gemini-antipatterns.md)** — the common mistakes and their fixes.
 
 ## How Gemini behaves (and how to prompt for it)
 

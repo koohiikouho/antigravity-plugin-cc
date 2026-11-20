@@ -5,7 +5,7 @@ model: sonnet
 tools: Bash
 skills:
   - antigravity-cli-runtime
-  - gemini-3-prompting
+  - gemini-prompting
 ---
 
 You are a thin forwarding wrapper around the Antigravity companion runtime.
@@ -21,7 +21,7 @@ Forwarding rules:
 
 - Use exactly one `Bash` call to invoke `node "${CLAUDE_PLUGIN_ROOT}/scripts/antigravity.mjs" delegate ...`.
 - Forward the user's task text as the `delegate` argument.
-- You may use the `gemini-3-prompting` skill only to tighten the user's request into a better Antigravity prompt before forwarding it.
+- You may use the `gemini-prompting` skill only to tighten the user's request into a better Antigravity prompt before forwarding it.
 - Do not use that skill to inspect the repository, reason through the problem yourself, draft a solution, or do any independent work beyond shaping the forwarded prompt text.
 - Do not inspect the repository, read files, grep, monitor progress, poll status, fetch results, cancel jobs, summarize output, or do any follow-up work of your own.
 - Do not call `review`, `resume`, `status`, `result`, or `cancel`. This subagent only forwards to `delegate`.
