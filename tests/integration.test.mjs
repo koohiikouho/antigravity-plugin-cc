@@ -76,7 +76,7 @@ test("a review diff beyond the Windows argv limit (32K) goes through", () => {
   writeFileSync(join(cwd, "big.txt"), "some changed line of code\n".repeat(4000)); // ~100KB
   g("add", "big.txt");
   const { stdout } = run(["review"], { cwd });
-  assert.match(stdout, /Fake agy reply/);
+  assert.match(stdout, /Verdict: .*needs work/);
 });
 
 test("quota exhaustion is surfaced with the reset window", () => {
@@ -110,7 +110,7 @@ test("review runs sandboxed and never with --yolo", () => {
   writeFileSync(join(cwd, "a.txt"), "hello\n");
   g("add", "a.txt");
   const { stdout, agyArgv } = run(["review", "--yolo"], { cwd });
-  assert.match(stdout, /Fake agy reply/);
+  assert.match(stdout, /Verdict/);
   assert.ok(agyArgv.includes("--sandbox"));
   assert.ok(!agyArgv.includes("--dangerously-skip-permissions"));
   assertReadOnlySettings(agyArgv);
@@ -182,4 +182,54 @@ test("missing binary yields install guidance", () => {
     },
   });
   assert.match(res.stdout, /not installed/);
+});
+
+function gitRepoWithChange(prefix) {
+  const cwd = tmp(prefix);
+  const g = (...a) => spawnSync("git", a, { cwd, encoding: "utf8" });
+  g("init", "-q");
+  writeFileSync(join(cwd, "a.txt"), "hello\n");
+  g("add", "a.txt");
+  return cwd;
+}
+
+test("read-only runs are refused, without running agy, when agy lacks --settings", () => {
+  const env = { FAKE_AGY_NO_SETTINGS: "1" };
+  const d = run(["delegate", "--read-only", "explain"], { extraEnv: env });
+  assert.match(d.stdout, /too old/i);
+  assert.match(d.stdout, /agy update/);
+  assert.equal(d.agyArgv, null, "agy must not run");
+  const r = run(["review"], { cwd: gitRepoWithChange("agy-old-"), extraEnv: env });
+  assert.match(r.stdout, /too old/i);
+  assert.equal(r.agyArgv, null);
+  // Background is refused too, and leaves no job behind.
+  const b = run(["delegate", "--read-only", "--background", "explain"], { extraEnv: env });
+  assert.match(b.stdout, /too old/i);
+  assert.match(run(["status"], { home: b.home, cwd: b.cwd }).stdout, /No Antigravity jobs/);
+  // A write-capable delegate still runs on an old agy.
+  assert.match(run(["delegate", "x"], { extraEnv: env }).stdout, /Fake agy reply/);
+});
+
+test("review passes --json-schema and renders findings most severe first", () => {
+  const cwd = gitRepoWithChange("agy-struct-");
+  const { stdout, agyArgv } = run(["review"], { cwd });
+  const schema = JSON.parse(agyArgv[agyArgv.indexOf("--json-schema") + 1]);
+  assert.deepEqual(schema.required, ["verdict", "summary", "findings"]);
+  assert.match(stdout, /needs work/);
+  assert.ok(stdout.indexOf("[high]") < stdout.indexOf("[low]"), "high before low");
+  assert.match(stdout, /`a\.txt:1`/, "paths shown relative to the repo");
+  assert.match(stdout, /Fix: Fix it\./);
+  assert.ok(!stdout.includes('"verdict"'), "raw JSON tail is not printed");
+});
+
+test("review falls back to prose when structured output is invalid or unsupported", () => {
+  const bad = run(["review"], { cwd: gitRepoWithChange("agy-bad-"), extraEnv: { FAKE_AGY_STRUCTURED: "bad" } });
+  assert.match(bad.stdout, /Fake agy reply/);
+  const old = run(["review"], { cwd: gitRepoWithChange("agy-noschema-"), extraEnv: { FAKE_AGY_NO_JSON_SCHEMA: "1" } });
+  assert.ok(!old.agyArgv.includes("--json-schema"));
+  assert.match(old.stdout, /Fake agy reply/);
+});
+
+test("delegate never asks for structured output", () => {
+  assert.ok(!run(["delegate", "x"]).agyArgv.includes("--json-schema"));
 });

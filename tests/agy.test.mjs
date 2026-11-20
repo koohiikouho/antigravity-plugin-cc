@@ -8,7 +8,10 @@ import {
   parseAgyStream,
   detectDenial,
   interpretRun,
+  latestToolStep,
 } from "../plugins/antigravity/scripts/lib/agy.mjs";
+import { normalizeReview } from "../plugins/antigravity/scripts/lib/review.mjs";
+import { displayPath } from "../plugins/antigravity/scripts/lib/render.mjs";
 
 test("buildPrintArgs: flags in order, stream-json last, no prompt in argv", () => {
   const args = buildPrintArgs({
@@ -174,4 +177,59 @@ test("interpretRun: spawn error and timeout win over everything", () => {
   const t = interpretRun({ timedOut: true, printTimeout: "10m" });
   assert.equal(t.error.kind, "timeout");
   assert.match(t.error.message, /10m/);
+});
+
+// Lines shaped like a live agy 1.5.13 run (paths shortened).
+const toolEv = (state, tool, params) =>
+  ev({ event: "step_update", step_update: { step_type: "tool", state, tool_name: tool, tool_info: { name: tool, parameters: params } } });
+
+test("latestToolStep reports the most recent tool action and counts steps", () => {
+  const out = [
+    ev({ event: "init", conversation_id: CID }),
+    toolEv("ACTIVE", "read_file", { Path: "C:\\repo\\m.py" }),
+    toolEv("DONE", "read_file", { Path: "C:\\repo\\m.py" }),
+    toolEv("ACTIVE", "run_command", { CommandLine: "npm test" }),
+  ].join("\n");
+  assert.deepEqual(latestToolStep(out), { tool: "run_command", target: "npm test", state: "ACTIVE", steps: 2 });
+  assert.equal(latestToolStep(ev({ event: "init" })), null);
+});
+
+test("latestToolStep drops a partial first line when reading a tail", () => {
+  const out = `${"x".repeat(50)}\n${toolEv("ACTIVE", "write_file", { Path: "/r/a" })}\n`;
+  const r = latestToolStep(out, out.length - 10); // cut inside the junk line
+  assert.equal(r.tool, "write_file");
+});
+
+test("interpretRun carries structured_output, and it alone counts as success", () => {
+  const o = interpretRun({
+    code: 0,
+    stdout: ev({ event: "result", result: { status: "SUCCESS", response: "", structured_output: { verdict: "ship" } } }),
+  });
+  assert.equal(o.ok, true);
+  assert.deepEqual(o.structured, { verdict: "ship" });
+});
+
+test("normalizeReview validates, defaults and sorts", () => {
+  assert.equal(normalizeReview(null), null);
+  assert.equal(normalizeReview({ verdict: "maybe" }), null);
+  const r = normalizeReview({
+    verdict: "needs-work",
+    summary: " s ",
+    findings: [
+      { severity: "low", file: "a", title: "t1", detail: "d" },
+      { severity: "bogus", title: "", line: -2 },
+      { severity: "critical", file: "b", line: 4, title: "t2", detail: "d" },
+    ],
+  });
+  assert.deepEqual(r.findings.map((f) => f.severity), ["critical", "low", "low"]);
+  assert.equal(r.findings[2].title, "(untitled finding)");
+  assert.equal(r.findings[2].line, null);
+  assert.equal(r.summary, "s");
+});
+
+test("displayPath relativizes paths inside cwd, case-insensitively on Windows drives", () => {
+  assert.equal(displayPath("C:\\Repo\\src\\a.js", "c:/repo"), "src/a.js");
+  assert.equal(displayPath("/home/u/repo/a.js", "/home/u/repo/"), "a.js");
+  assert.equal(displayPath("/home/u/other/a.js", "/home/u/repo"), "/home/u/other/a.js");
+  assert.equal(displayPath("/home/u/Repo/a.js", "/home/u/repo"), "/home/u/Repo/a.js");
 });

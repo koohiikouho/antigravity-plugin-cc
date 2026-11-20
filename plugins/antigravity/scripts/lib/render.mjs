@@ -45,6 +45,73 @@ export function renderResponse(responseText, meta = {}) {
   return ensureTrailingNewline(lines.join("\n").trimEnd());
 }
 
+/** Show `file` relative to `cwd` when it lives inside it (agy reports absolute paths). */
+export function displayPath(file, cwd) {
+  const f = String(file || "");
+  if (!f || !cwd) return f;
+  const norm = (p) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  const nf = norm(f);
+  const prefix = `${norm(String(cwd))}/`;
+  const ci = /^[a-z]:\//i.test(prefix); // Windows paths compare case-insensitively
+  const head = nf.slice(0, prefix.length);
+  if (ci ? head.toLowerCase() === prefix.toLowerCase() : head === prefix) return nf.slice(prefix.length);
+  return f;
+}
+
+const VERDICT_LABEL = {
+  ship: "✅ ship",
+  "ship-with-nits": "🟡 ship with nits",
+  "needs-work": "🔴 needs work",
+};
+
+/** Structured review (from --json-schema). Findings arrive sorted, most severe first. */
+export function renderReview(review, meta = {}) {
+  const header = meta.title ? `# 🛰️ Antigravity — ${meta.title}` : "# 🛰️ Antigravity — review";
+  const lines = [header, "", `**Verdict: ${VERDICT_LABEL[review.verdict] || review.verdict}**`];
+  if (review.summary) lines.push("", review.summary);
+  if (review.findings.length) {
+    lines.push("", `## Findings (${review.findings.length})`);
+    for (const f of review.findings) {
+      const file = displayPath(f.file, meta.cwd);
+      const loc = file ? ` \`${file}${f.line ? `:${f.line}` : ""}\`` : "";
+      lines.push("", `- **[${f.severity}]**${loc} — ${f.title}`);
+      if (f.detail) lines.push(`  ${f.detail.replace(/\n/g, "\n  ")}`);
+      if (f.fix) {
+        if (f.fix.includes("\n")) lines.push("  Fix:", "", "  ```", ...f.fix.split("\n").map((l) => `  ${l}`), "  ```");
+        else lines.push(`  Fix: ${f.fix}`);
+      }
+    }
+  } else {
+    lines.push("", "No findings.");
+  }
+  if (review.nextSteps.length) {
+    lines.push("", "## Next steps");
+    for (const step of review.nextSteps) lines.push(`- ${step}`);
+  }
+  lines.push(...denialLines(meta.denial, meta), ...resumeFooter(meta));
+  return ensureTrailingNewline(lines.join("\n").trimEnd());
+}
+
+/** agy is too old for a feature the run needs. */
+export function renderNeedsUpdate(what) {
+  const isReview = what === "review";
+  return ensureTrailingNewline(
+    [
+      `# 🛰️ Antigravity — ${isReview ? "review" : "read-only run"}`,
+      "",
+      `**Your agy is too old for ${isReview ? "a read-only review" : "`--read-only`"}.** The plugin enforces read-only runs with session deny rules (\`--settings\`), and this agy build doesn't list that flag in \`agy --help\`.`,
+      "",
+      "Update it, then retry:",
+      "",
+      "```bash",
+      "agy update",
+      "```",
+      "",
+      "Nothing was run: the plugin won't start a \"read-only\" job it can't keep read-only.",
+    ].join("\n"),
+  );
+}
+
 /** Quota / auth / backend error, with concrete next steps. */
 export function renderError(error, meta = {}) {
   const lines = [`# 🛰️ Antigravity — ${meta.title || "error"}`, ""];
@@ -157,10 +224,18 @@ export function renderBackgroundStarted(job) {
   return ensureTrailingNewline(lines.join("\n"));
 }
 
+function progressText(progress, cwd) {
+  if (!progress) return "";
+  const target = progress.target ? ` \`${displayPath(progress.target, cwd)}\`` : "";
+  const verb = progress.state === "ACTIVE" ? "now" : "last";
+  return `${verb}: ${progress.tool}${target} (${progress.steps} tool step${progress.steps === 1 ? "" : "s"})`;
+}
+
 function jobLine(job) {
   const bits = [`\`${job.id}\``, job.status];
   if (job.kind) bits.push(job.kind);
   if (job.title) bits.push(job.title);
+  if (job.status === "running" && job.progress) bits.push(progressText(job.progress, job.cwd));
   return `- ${bits.join(" · ")}`;
 }
 
@@ -197,6 +272,7 @@ export function renderJobStatus(job) {
     job.finishedAt ? `Finished: ${job.finishedAt}` : "",
     job.error ? `Error: ${job.error}` : "",
     job.denial ? `Auto-denied: ${job.denial.actions?.join(", ") || "a tool action"}` : "",
+    job.status === "running" && job.progress ? `Progress: ${progressText(job.progress, job.cwd)}` : "",
   ].filter(Boolean);
   if (job.status === "running") {
     lines.push("", `Get the result when done: \`/antigravity:result ${job.id}\``);

@@ -22,6 +22,16 @@ if (argv.includes("--version")) {
   process.stdout.write("9.9.9-fake\n");
   process.exit(0);
 }
+// Feature probe. Handled before the argv-file write so tests can assert that a
+// refused run never invoked agy. FAKE_AGY_NO_SETTINGS / FAKE_AGY_NO_JSON_SCHEMA
+// imitate older builds.
+if (argv.includes("--help")) {
+  const lines = ["Usage of agy:", "  --model    Model for the current CLI session", "  --sandbox  Run in a sandbox"];
+  if (!process.env.FAKE_AGY_NO_JSON_SCHEMA) lines.push("  --json-schema  Optional JSON schema string or path");
+  if (!process.env.FAKE_AGY_NO_SETTINGS) lines.push("  --settings  Settings for this session only, never saved");
+  process.stdout.write(`${lines.join("\n")}\n`);
+  process.exit(0);
+}
 if (argv[0] === "models") {
   process.stdout.write("gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)\ngemini-4-neon-high\tGemini 4 Neon (High)\n");
   process.exit(0);
@@ -77,8 +87,48 @@ if (mode === "denied") {
   process.exit(0);
 }
 
+// A tool step shaped like agy 1.5.13's (captured from a live run).
+const toolPath = `${process.cwd()}/README.md`;
+const tool = (state) =>
+  emit({
+    event: "step_update",
+    step_update: {
+      conversation_id: convId,
+      step_index: 1,
+      state,
+      step_type: "tool",
+      tool_name: "read_file",
+      tool_info: { name: "read_file", parameters: { Path: toolPath } },
+    },
+  });
+tool("ACTIVE");
+tool("DONE");
+
 const echo = String(prompt).slice(0, 60).replace(/\s+/g, " ");
-const text = `Fake agy reply. I received: "${echo}". Verdict: looks good.`;
+let text = `Fake agy reply. I received: "${echo}". Verdict: looks good.`;
+const extra = {};
+// With --json-schema, real agy appends the JSON to the prose response and puts
+// the parsed object in result.structured_output. FAKE_AGY_VERDICT picks the verdict;
+// FAKE_AGY_STRUCTURED=bad sends an object that fails validation.
+if (valueOf("--json-schema")) {
+  const verdict = process.env.FAKE_AGY_VERDICT || "needs-work";
+  extra.structured_output =
+    process.env.FAKE_AGY_STRUCTURED === "bad"
+      ? { verdict: "maybe" }
+      : {
+          verdict,
+          summary: "Fake structured review.",
+          findings:
+            verdict === "ship"
+              ? []
+              : [
+                  { severity: "low", file: `${process.cwd()}/a.txt`, line: 3, title: "Minor nit", detail: "A small thing." },
+                  { severity: "high", file: `${process.cwd()}/a.txt`, line: 1, title: "Real bug", detail: "Something breaks.", fix: "Fix it." },
+                ],
+          next_steps: ["Re-run the tests."],
+        };
+  text = `${text}\n${JSON.stringify(extra.structured_output)}`;
+}
 emit({ event: "step_update", step_update: { step_type: "agent_response", text_delta: text } });
-result({ status: "SUCCESS", response: text });
+result({ status: "SUCCESS", response: text, ...extra });
 process.exit(0);

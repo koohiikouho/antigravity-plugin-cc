@@ -23,9 +23,12 @@ import {
   goDurationToMs,
   agyVersion,
   agyModels,
+  agyFeatures,
+  latestToolStep,
   readLogSafe,
 } from "./lib/agy.mjs";
 import { resolveReviewTarget } from "./lib/git.mjs";
+import { REVIEW_SCHEMA, normalizeReview } from "./lib/review.mjs";
 import { createJob, writeJob, readJob, reconcile, listJobs, latestJob, cancelJob, nowIso } from "./lib/jobs.mjs";
 import * as render from "./lib/render.mjs";
 
@@ -148,6 +151,15 @@ function runAgyTask(parsed, { kind, title, prompt, readOnly, resume }) {
   const bin = requireBinaryOrExit();
   const cwd = process.cwd();
 
+  // Read-only depends on session deny rules (--settings). Refuse rather than
+  // run a "read-only" job that can still write files. Checked before createJob
+  // so a refusal leaves no orphaned job, foreground or background.
+  const features = agyFeatures(bin.path);
+  if (readOnly && !features.settings) {
+    out(render.renderNeedsUpdate(kind === "review" ? "review" : "--read-only"));
+    return;
+  }
+
   const sandbox = hasFlag(parsed, "sandbox") || Boolean(readOnly);
   // Auto-approving every tool is opt-in, and never allowed for read-only runs.
   let yolo = hasFlag(parsed, "yolo");
@@ -194,6 +206,8 @@ function runAgyTask(parsed, { kind, title, prompt, readOnly, resume }) {
     sandbox,
     yolo,
     settings: readOnly ? READ_ONLY_SETTINGS : undefined,
+    // Older agy without --json-schema still gets a prose review.
+    jsonSchema: kind === "review" && features.jsonSchema ? REVIEW_SCHEMA : undefined,
     addDirs,
     conversationId,
     logFile: job.paths.log,
@@ -237,10 +251,17 @@ function renderOutcome(outcome, job, { yolo, readOnly } = {}) {
     conversationId: job.conversationId,
     logFile: job.paths.log,
     denial: outcome.denial,
+    cwd: job.cwd,
     yolo,
     readOnly,
   };
-  if (outcome.ok) return render.renderResponse(outcome.response, meta);
+  if (outcome.ok) {
+    // A structured review renders on its own; agy's `response` repeats it as a
+    // trailing JSON line, so it is not printed too. Bad shapes fall back to prose.
+    const review = job.kind === "review" ? normalizeReview(outcome.structured) : null;
+    if (review) return render.renderReview(review, meta);
+    return render.renderResponse(outcome.response, meta);
+  }
   return render.renderError(outcome.error, { ...meta, partialResponse: outcome.response });
 }
 
@@ -324,10 +345,16 @@ function cmdStatus(parsed) {
       return;
     }
     reconcile(job);
-    out(render.renderJobStatus(job));
+    out(render.renderJobStatus(withProgress(job)));
     return;
   }
-  out(render.renderStatus(listJobs(process.cwd())));
+  out(render.renderStatus(listJobs(process.cwd()).map(withProgress)));
+}
+
+/** Attach the latest tool step to a running background job (read from its output file). */
+function withProgress(job) {
+  if (job.status !== "running") return job;
+  return { ...job, progress: latestToolStep(readLogSafe(job.paths.output)) };
 }
 
 function cmdResult(parsed) {
@@ -339,7 +366,7 @@ function cmdResult(parsed) {
   }
   reconcile(job);
   if (job.status === "running") {
-    out(render.renderJobStatus(job));
+    out(render.renderJobStatus(withProgress(job)));
     return;
   }
 

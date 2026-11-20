@@ -54,6 +54,7 @@ export const READ_ONLY_SETTINGS = Object.freeze({
  * @param {string}  [opts.effort]          --effort low|medium|high|xhigh|max
  * @param {string}  [opts.mode]            --mode accept-edits|auto|plan
  * @param {object}  [opts.settings]        --settings <json> (session-only settings.json overrides)
+ * @param {object}  [opts.jsonSchema]      --json-schema <json> (structured final result)
  * @param {string}  [opts.conversationId]  --conversation <id>
  * @param {string}  [opts.logFile]         --log-file <path>
  * @param {string}  [opts.printTimeout]    --print-timeout <go-dur>, e.g. "10m"
@@ -67,6 +68,7 @@ export function buildPrintArgs(opts = {}) {
   if (opts.sandbox) args.push("--sandbox");
   if (opts.yolo) args.push("--dangerously-skip-permissions");
   if (opts.settings) args.push("--settings", JSON.stringify(opts.settings));
+  if (opts.jsonSchema) args.push("--json-schema", JSON.stringify(opts.jsonSchema));
   for (const dir of opts.addDirs || []) {
     if (dir) args.push("--add-dir", dir);
   }
@@ -145,6 +147,50 @@ export function parseAgyStream(stdout) {
   return { conversationId: conversationId || null, result, streamedText };
 }
 
+/**
+ * Latest tool action from agy stream-json output, for `status` on a running
+ * background job. Reads only the tail of large outputs; the first line of a
+ * tail is usually partial and is dropped.
+ *
+ * Tool steps look like (agy 1.5.13):
+ *   {"event":"step_update","step_update":{"step_type":"tool","state":"ACTIVE"|"DONE",
+ *    "tool_name":"read_file","tool_info":{"parameters":{"Path":"..."}}}}
+ *
+ * @returns {{ tool: string, target: string|null, state: string|null, steps: number }|null}
+ */
+export function latestToolStep(stdout, maxBytes = 256 * 1024) {
+  let text = String(stdout || "");
+  let truncated = false;
+  if (text.length > maxBytes) {
+    text = text.slice(-maxBytes);
+    truncated = true;
+  }
+  const lines = text.split(/\r?\n/);
+  if (truncated) lines.shift();
+  let last = null;
+  let steps = 0;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (!line.startsWith("{") || !line.includes('"tool"')) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const s = obj.event === "step_update" ? obj.step_update || {} : null;
+    if (!s || s.step_type !== "tool") continue;
+    if (s.state === "ACTIVE") steps += 1;
+    const p = s.tool_info?.parameters || {};
+    const target =
+      [p.Path, p.CommandLine, p.Command, p.Url, p.Query, p.Pattern].find((v) => typeof v === "string" && v) ||
+      Object.values(p).find((v) => typeof v === "string" && v) ||
+      null;
+    last = { tool: s.tool_name || s.tool_info?.name || "tool", target, state: s.state || null };
+  }
+  return last ? { ...last, steps } : null;
+}
+
 const DENIAL_RE = /auto-denied|was denied|cannot prompt for|user denied perm/i;
 
 /** Extract a human-readable denial summary from the result + stderr. */
@@ -167,7 +213,7 @@ export function detectDenial(result, stderr) {
  * @param {{stdout?: string, stderr?: string, code?: number|null, timedOut?: boolean,
  *          error?: string, logText?: string, printTimeout?: string}} run
  * @returns {{ ok: boolean, response: string, conversationId: string|null,
- *             status: string|null, denial: object|null,
+ *             status: string|null, denial: object|null, structured: object|null,
  *             error: {kind: string, message: string, resetsIn: string|null}|null }}
  */
 export function interpretRun(run) {
@@ -176,7 +222,8 @@ export function interpretRun(run) {
   const denial = detectDenial(result, stderr);
   const response = String(result?.response ?? streamedText ?? "").trim();
   const status = result?.status || null;
-  const base = { response, conversationId, status, denial };
+  const structured = result?.structured_output && typeof result.structured_output === "object" ? result.structured_output : null;
+  const base = { response, conversationId, status, denial, structured };
 
   if (run.error) {
     return { ...base, ok: false, error: { kind: "spawn", message: run.error, resetsIn: null } };
@@ -189,7 +236,7 @@ export function interpretRun(run) {
     };
   }
 
-  if (status === "SUCCESS" && response) {
+  if (status === "SUCCESS" && (response || structured)) {
     return { ...base, ok: true, error: null };
   }
   if (status === "SUCCESS" && denial) {
@@ -306,6 +353,30 @@ export function agyVersion(bin) {
     /* ignore */
   }
   return null;
+}
+
+const featureCache = new Map();
+
+/**
+ * Optional flags this agy build supports, read from `agy --help` (stdout and
+ * stderr). Memoized per process only: agy self-updates, so a disk cache would
+ * go stale.
+ *
+ * @returns {{ settings: boolean, jsonSchema: boolean }}
+ */
+export function agyFeatures(bin) {
+  if (featureCache.has(bin)) return featureCache.get(bin);
+  let text = "";
+  try {
+    const spec = launchSpec(bin, ["--help"]);
+    const res = spawnSync(spec.cmd, spec.args, { encoding: "utf8", timeout: 15000, windowsHide: true });
+    text = `${res.stdout || ""}\n${res.stderr || ""}`;
+  } catch {
+    /* treat as no optional features */
+  }
+  const features = { settings: /--settings\b/.test(text), jsonSchema: /--json-schema\b/.test(text) };
+  featureCache.set(bin, features);
+  return features;
 }
 
 /** `agy models` -> [{ slug, name }] or [] on failure. */
