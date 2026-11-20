@@ -18,6 +18,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { openSync, readFileSync, existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { classifyErrorText } from "./logscan.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -44,6 +45,28 @@ export function launchSpec(bin, args = []) {
 export const READ_ONLY_SETTINGS = Object.freeze({
   permissions: { deny: ["write_file(*)", "command(*)"] },
 });
+
+/**
+ * The `--settings` payload for a read-only run, keeping the user's own rules.
+ * On 1.5.13 the `--settings` permissions replaced the ones in settings.json
+ * (verified live: a settings.json deny on read_file stopped applying once
+ * `--settings` carried a different deny list). So we copy the user's
+ * `permissions` from `<configDir>/settings.json` and add our deny rules on top.
+ * The file is only read, never written. Missing or invalid → our rules alone.
+ */
+export function readOnlySettings(configDir) {
+  let user = {};
+  try {
+    const parsed = JSON.parse(readFileSync(join(configDir, "settings.json"), "utf8"));
+    const perms = parsed && parsed.permissions;
+    if (perms && typeof perms === "object" && !Array.isArray(perms)) user = perms;
+  } catch {
+    // no settings.json, or not JSON: nothing to carry over
+  }
+  const userDeny = Array.isArray(user.deny) ? user.deny.filter((r) => typeof r === "string") : [];
+  const deny = [...new Set([...userDeny, ...READ_ONLY_SETTINGS.permissions.deny])];
+  return { permissions: { ...user, deny } };
+}
 
 /**
  * @param {object} opts

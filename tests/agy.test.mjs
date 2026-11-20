@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   buildPrintArgs,
   encodePrompt,
@@ -9,6 +12,8 @@ import {
   detectDenial,
   interpretRun,
   latestToolStep,
+  readOnlySettings,
+  READ_ONLY_SETTINGS,
 } from "../plugins/antigravity/scripts/lib/agy.mjs";
 import { normalizeReview } from "../plugins/antigravity/scripts/lib/review.mjs";
 import { displayPath } from "../plugins/antigravity/scripts/lib/render.mjs";
@@ -232,4 +237,29 @@ test("displayPath relativizes paths inside cwd, case-insensitively on Windows dr
   assert.equal(displayPath("/home/u/repo/a.js", "/home/u/repo/"), "a.js");
   assert.equal(displayPath("/home/u/other/a.js", "/home/u/repo"), "/home/u/other/a.js");
   assert.equal(displayPath("/home/u/Repo/a.js", "/home/u/repo"), "/home/u/Repo/a.js");
+});
+
+test("readOnlySettings: no settings.json gives the plugin deny rules alone", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agy-cfg-"));
+  assert.deepEqual(readOnlySettings(dir), { permissions: { deny: [...READ_ONLY_SETTINGS.permissions.deny] } });
+});
+
+test("readOnlySettings: keeps the user's permissions and adds the deny rules", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agy-cfg-"));
+  writeFileSync(
+    join(dir, "settings.json"),
+    JSON.stringify({ theme: "dark", permissions: { allow: ["read_file(*)"], deny: ["read_file(.env)", "command(*)"] } }),
+  );
+  const s = readOnlySettings(dir);
+  assert.deepEqual(s.permissions.allow, ["read_file(*)"]);
+  assert.deepEqual(s.permissions.deny, ["read_file(.env)", "command(*)", "write_file(*)"]);
+  assert.equal(s.theme, undefined, "only permissions are carried over");
+});
+
+test("readOnlySettings: invalid settings.json is ignored", () => {
+  const dir = mkdtempSync(join(tmpdir(), "agy-cfg-"));
+  writeFileSync(join(dir, "settings.json"), "{not json");
+  assert.deepEqual(readOnlySettings(dir).permissions.deny, [...READ_ONLY_SETTINGS.permissions.deny]);
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ permissions: { deny: "nope" } }));
+  assert.deepEqual(readOnlySettings(dir).permissions.deny, [...READ_ONLY_SETTINGS.permissions.deny]);
 });

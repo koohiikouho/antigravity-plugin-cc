@@ -13,6 +13,7 @@ Updated for agy 1.5.x and Windows.
 - `resume` continues this repo's last recorded conversation instead of agy's global `--continue`, which could pick up another repo's thread.
 - `review` with no `--base` no longer duplicates staged changes, and works in a repo with no commits.
 - `review` and `--read-only` refuse to run, with an `agy update` hint, when `agy --help` doesn't list `--settings`. Before, they could run without the deny rules.
+- Read-only runs keep your own agy permission rules. `--settings` replaces the `permissions` in agy's `settings.json`, so the plugin now copies them in and adds its deny rules on top.
 - The `gemini-3-prompting` skill is now `gemini-prompting`.
 - The README banner image was removed.
 

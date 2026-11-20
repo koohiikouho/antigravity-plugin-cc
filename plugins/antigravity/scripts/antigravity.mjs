@@ -15,7 +15,7 @@ import { parseArgs, hasFlag } from "./lib/args.mjs";
 import { resolveAgyBinary, agyConfigDir } from "./lib/paths.mjs";
 import {
   buildPrintArgs,
-  READ_ONLY_SETTINGS,
+  readOnlySettings,
   encodePrompt,
   interpretRun,
   runForeground,
@@ -239,7 +239,7 @@ function runAgyTask(parsed, { kind, title, prompt, readOnly, resume }) {
     mode,
     sandbox,
     yolo,
-    settings: readOnly ? READ_ONLY_SETTINGS : undefined,
+    settings: readOnly ? readOnlySettings(agyConfigDir()) : undefined,
     // Older agy without --json-schema still gets a prose review.
     jsonSchema: kind === "review" && features.jsonSchema ? REVIEW_SCHEMA : undefined,
     addDirs,
@@ -338,7 +338,7 @@ function cmdReview(parsed) {
 
   const prompt = buildReviewPrompt(target, focus);
   // Reviews are read-only: sandboxed, never auto-approved, and with session deny
-  // rules for file writes and commands (READ_ONLY_SETTINGS).
+  // rules for file writes and commands (readOnlySettings).
   runAgyTask(parsed, {
     kind: "review",
     title: `review ${target.label}`,
@@ -408,7 +408,7 @@ function cmdReviewGateHook() {
   const args = buildPrintArgs({
     model: process.env.ANTIGRAVITY_CC_MODEL || null,
     sandbox: true,
-    settings: READ_ONLY_SETTINGS,
+    settings: readOnlySettings(agyConfigDir()),
     jsonSchema: REVIEW_SCHEMA,
     addDirs: [cwd],
     printTimeout: GATE_PRINT_TIMEOUT,

@@ -93,7 +93,7 @@ and also appends it as JSON to the end of `response`. The plugin renders
 | `--conversation <id>` | Resume a specific conversation. |
 | `-c`, `--continue` | Resume the most recent conversation **globally**, which can be another repo's. The plugin does not use it; it resumes by this repo's last recorded conversation ID instead. |
 | `--log-file <path>` | Log path; the plugin keeps it per job for diagnostics. |
-| `--settings <json\|path>` | Session-only settings overrides, never saved. Read-only runs pass `{"permissions":{"deny":["write_file(*)","command(*)"]}}`. The plugin checks `agy --help` for this flag and refuses read-only runs without it. |
+| `--settings <json\|path>` | Session-only settings overrides, never saved. Read-only runs pass the user's own `permissions` from `settings.json` with `write_file(*)` and `command(*)` added to `deny` (see item 5). The plugin checks `agy --help` for this flag and refuses read-only runs without it. |
 | `--json-schema <json\|path>` | Ask for output matching a JSON schema; result in `result.structured_output`. `review` and the review gate pass the schema in `scripts/lib/review.mjs` when `agy --help` lists the flag. |
 
 ## Runtime behavior (verified live)
@@ -120,13 +120,17 @@ and also appends it as JSON to the end of `response`. The plugin renders
    - Writes blocked by these deny rules did **not** show up in `denied_actions`
      (it was absent from the result). Don't rely on it to tell the user what a
      read-only run was stopped from doing.
-   - **Untested: whether `--settings` merges with or replaces `settings.json`.**
-     The machine it was checked on had an empty `settings.json`, so a user's own
-     `permissions.allow` rules may or may not survive a read-only run. The deny
-     rules win either way (Deny > Allow), so read-only holds in both cases.
-7. `--sandbox` + `--settings` deny rules + `--json-schema` work together
+   - `--settings` **replaces** the `permissions` in `settings.json` rather than
+     merging (1.5.13, checked with a throwaway HOME): a `settings.json` deny on
+     `read_file(*)` blocked a read on its own, but once `--settings` carried
+     `{"permissions":{"deny":["write_file(*)"]}}` the same read went through.
+     Whether the replacement is per key or whole-file is not known. So the
+     plugin reads the user's `settings.json` (never writes it) and passes their
+     `permissions` along with its own deny rules added, so the user's rules
+     still apply during read-only runs.
+6. `--sandbox` + `--settings` deny rules + `--json-schema` work together
    (1.5.13): the write was blocked and `structured_output` held the review.
-8. Conversations persist as `~/.gemini/antigravity-cli/conversations/<id>.pb`.
+7. Conversations persist as `~/.gemini/antigravity-cli/conversations/<id>.pb`.
 
 ## Trust the diff, not the summary
 
